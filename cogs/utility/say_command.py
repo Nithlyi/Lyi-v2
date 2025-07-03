@@ -25,21 +25,26 @@ class SayCommand(commands.Cog):
             logging.warning(f"Comando /say: Bot sem permissão para enviar mensagem no canal {channel.id} na guild {interaction.guild.id}.")
             # Edita a resposta original para informar a falta de permissão
             await interaction.edit_original_response(content=f"Não tenho permissão para enviar mensagens em {channel.mention}.")
+            logging.warning(f"Comando /say: Bot sem permissão para enviar mensagem no canal {channel.id} na guild {interaction.guild.id}.")
             return
 
         try:
             await channel.send(message)
             logging.info(f"Comando /say usado por {interaction.user.id} para enviar mensagem em {channel.id} na guild {interaction.guild.id}.")
-            # Edita a resposta original para confirmar o envio
-            await interaction.edit_original_response(content=f"Mensagem enviada com sucesso em {channel.mention}.")
+            try:
+                # Tenta editar a resposta original para confirmar o envio
+                await interaction.edit_original_response(content=f"Mensagem enviada com sucesso em {channel.mention}.")
+            except discord.errors.HTTPException as http_exc_success:
+                # Se falhar a edição por rate limit ou outro erro HTTP, loga mas não trava a interação
+                logging.error(f"Comando /say: Falha ao editar resposta original de sucesso (HTTP {http_exc_success.status}): {http_exc_success}")
         except Exception as e:
             logging.error(f"Comando /say: Erro inesperado ao enviar mensagem em {channel.id} na guild {interaction.guild.id}: {e}", exc_info=True)
-            # Em caso de erro (mesmo que no edit da resposta), edita a resposta original para mostrar o erro.
-            # Isto é um fallback, o erro 429 no edit ainda pode ocorrer, mas é menos provável.
             try:
-                 await interaction.edit_original_response(content=f"Ocorreu um erro ao enviar a mensagem: {e}")
-            except Exception as edit_err:
-                 logging.error(f"Comando /say: Falha secundária ao editar resposta de erro: {edit_err}")
+                # Tenta editar a resposta original para mostrar o erro.
+                await interaction.edit_original_response(content=f"Ocorreu um erro ao enviar a mensagem: {e}")
+            except discord.errors.HTTPException as http_exc_error:
+                 # Se falhar a edição da resposta de erro, loga
+                logging.error(f"Comando /say: Falha ao editar resposta original de erro (HTTP {http_exc_error.status}): {http_exc_error}")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SayCommand(bot))
