@@ -1,4 +1,3 @@
-# cogs/moderation/lockdown_panel.py
 import discord
 from discord.ext import commands
 import logging
@@ -33,7 +32,7 @@ class LockdownPanelButtons(View):
 
         # Busca o canal atual do painel de lockdown para ver se ele já está bloqueado
         panel_settings = execute_query("SELECT channel_id FROM lockdown_panel_settings WHERE guild_id = ?", 
-                                       (interaction.guild_id,), fetchone=True)
+                                        (interaction.guild_id,), fetchone=True)
         
         if panel_settings and panel_settings[0] == interaction.channel_id:
             # Se o botão está no canal do painel, verificar se o *canal do painel* já está em lockdown
@@ -54,7 +53,7 @@ class LockdownPanelButtons(View):
                 await interaction.followup.send(f"❌ Ocorreu um erro ao tentar ativar o lockdown: {e}", ephemeral=True)
                 logger.error(f"Erro ao ativar lockdown via painel para canal {interaction.channel.id}: {e}", exc_info=True)
         else:
-             await interaction.response.send_message("❌ Este painel de lockdown não está configurado para este canal.", ephemeral=True)
+            await interaction.response.send_message("❌ Este painel de lockdown não está configurado para este canal.", ephemeral=True)
 
 
     @discord.ui.button(label="Desativar Lockdown", style=ButtonStyle.green, custom_id="lockdown_panel:deactivate")
@@ -72,7 +71,7 @@ class LockdownPanelButtons(View):
 
         # Busca o canal atual do painel de lockdown para ver se ele está bloqueado
         panel_settings = execute_query("SELECT channel_id FROM lockdown_panel_settings WHERE guild_id = ?", 
-                                       (interaction.guild_id,), fetchone=True)
+                                        (interaction.guild_id,), fetchone=True)
         
         if panel_settings and panel_settings[0] == interaction.channel_id:
             # Se o botão está no canal do painel, verificar se o *canal do painel* está em lockdown
@@ -105,14 +104,17 @@ class LockdownPanel(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         logger.info("Cog de Painel de Lockdown inicializada.")
-        self.bot.add_view(LockdownPanelButtons(self.bot)) # Adiciona a view persistente ao iniciar
+        # O bot.add_view(LockdownPanelButtons(self.bot)) é normalmente feito no on_ready
+        # ou em um setup_hook para views persistentes carregadas do DB.
+        # Mas para garantir que a view é "conhecida" pelo bot desde o início, mantemos aqui.
+        # A forma mais robusta é no listener on_ready ou setup_hook após o carregamento do DB.
 
     @commands.hybrid_group(name="lockdown_panel", description="Comandos para gerenciar o painel de lockdown.")
     @commands.has_permissions(manage_guild=True)
     async def lockdown_panel_group(self, ctx: commands.Context):
         """Comandos para gerenciar o painel de lockdown."""
         if ctx.invoked_subcommand is None:
-            await ctx.send("Comando inválido para o painel de lockdown. Use `setup` ou `remove`.")
+            await ctx.send("Comando inválido para o painel de lockdown. Use `setup` ou `remove`.", ephemeral=True) # Adicionado ephemeral=True
 
     @lockdown_panel_group.command(name="setup", description="Configura o painel de lockdown em um canal.")
     @app_commands.describe(
@@ -120,7 +122,7 @@ class LockdownPanel(commands.Cog):
     )
     async def setup_panel(self, ctx: commands.Context, channel: discord.TextChannel):
         if not ctx.guild:
-            return await ctx.send("Este comando só pode ser usado em um servidor.")
+            return await ctx.send("Este comando só pode ser usado em um servidor.", ephemeral=True)
 
         embed = discord.Embed(
             title="Painel de Lockdown",
@@ -151,7 +153,7 @@ class LockdownPanel(commands.Cog):
     @lockdown_panel_group.command(name="remove", description="Remove o painel de lockdown configurado.")
     async def remove_panel(self, ctx: commands.Context):
         if not ctx.guild:
-            return await ctx.send("Este comando só pode ser usado em um servidor.")
+            return await ctx.send("Este comando só pode ser usado em um servidor.", ephemeral=True)
 
         settings = execute_query("SELECT channel_id, message_id FROM lockdown_panel_settings WHERE guild_id = ?", 
                                  (ctx.guild.id,), fetchone=True)
