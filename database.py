@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import datetime 
 
 # Configuração de logging para ver mensagens do banco de dados
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -31,30 +32,31 @@ def init_db():
                     enabled BOOLEAN DEFAULT 0,
                     min_account_age_hours INTEGER DEFAULT 24,
                     join_burst_threshold INTEGER DEFAULT 10,
-                    join_burst_time_seconds INTEGER DEFAULT 60
-                    -- channel_id e message_id serão adicionados via ALTER TABLE se não existirem
+                    join_burst_time_seconds INTEGER DEFAULT 60,
+                    channel_id INTEGER, 
+                    message_id INTEGER 
                 )
             """)
             logging.info("Tabela 'anti_raid_settings' verificada/criada.")
 
-            # ADICIONA AS COLUNAS 'channel_id' E 'message_id' SE NÃO EXISTIREM
+            # ALTER TABLE para adicionar 'channel_id' E 'message_id' SE JÁ EXISTIR
             try:
                 cursor.execute("ALTER TABLE anti_raid_settings ADD COLUMN channel_id INTEGER;")
-                logging.info("Coluna 'channel_id' adicionada à tabela 'anti_raid_settings'.")
+                logging.info("Coluna 'channel_id' adicionada à tabela 'anti_raid_settings' (via ALTER TABLE).")
             except sqlite3.OperationalError as e:
                 if "duplicate column name: channel_id" in str(e):
                     logging.info("Coluna 'channel_id' já existe na tabela 'anti_raid_settings'.")
                 else:
-                    logging.error(f"Erro ao adicionar coluna 'channel_id' à tabela 'anti_raid_settings': {e}")
+                    logging.error(f"Erro ao adicionar coluna 'channel_id' à tabela 'anti_raid_settings': {e}", exc_info=True)
 
             try:
                 cursor.execute("ALTER TABLE anti_raid_settings ADD COLUMN message_id INTEGER;")
-                logging.info("Coluna 'message_id' adicionada à tabela 'anti_raid_settings'.")
+                logging.info("Coluna 'message_id' adicionada à tabela 'anti_raid_settings' (via ALTER TABLE).")
             except sqlite3.OperationalError as e:
                 if "duplicate column name: message_id" in str(e):
                     logging.info("Coluna 'message_id' já existe na tabela 'anti_raid_settings'.")
                 else:
-                    logging.error(f"Erro ao adicionar coluna 'message_id' à tabela 'anti_raid_settings': {e}")
+                    logging.error(f"Erro ao adicionar coluna 'message_id' à tabela 'anti_raid_settings': {e}", exc_info=True)
 
 
             # Tabela para mensagens de Welcome/Leave
@@ -92,11 +94,11 @@ def init_db():
                     guild_id INTEGER PRIMARY KEY,
                     category_id INTEGER,
                     transcript_channel_id INTEGER,
-                    ticket_role_id INTEGER, -- Cargo que pode ver tickets
-                    ticket_message_id INTEGER, -- ID da mensagem do painel de ticket
-                    ticket_channel_id INTEGER, -- Canal onde o painel de ticket está
-                    panel_embed_json TEXT, -- Coluna para o embed do painel de tickets
-                    ticket_initial_embed_json TEXT -- NOVA COLUNA para o embed da mensagem inicial do ticket
+                    ticket_role_id INTEGER, 
+                    ticket_message_id INTEGER, 
+                    ticket_channel_id INTEGER, 
+                    panel_embed_json TEXT, 
+                    ticket_initial_embed_json TEXT 
                 )
             """)
             logging.info("Tabela 'ticket_settings' verificada/criada (incluindo ticket_initial_embed_json).")
@@ -105,14 +107,14 @@ def init_db():
             # Tabela para tickets ativos
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS active_tickets (
-                    ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticket_id INTEGER PRIMARY KEY AUTOINCREMENT, 
                     guild_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
                     channel_id INTEGER NOT NULL UNIQUE,
                     opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     status TEXT DEFAULT 'open',
-                    closed_by_id INTEGER, -- Nova coluna para quem fechou o ticket
-                    closed_at TIMESTAMP -- Nova coluna para quando o ticket foi fechado
+                    closed_by_id INTEGER, 
+                    closed_at TIMESTAMP 
                 )
             """)
             logging.info("Tabela 'active_tickets' verificada/criada.")
@@ -127,7 +129,7 @@ def init_db():
                     partner2_id INTEGER NOT NULL,
                     married_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(guild_id, partner1_id),
-                    UNIQUE(guild_id, partner2_id) -- Garante que uma pessoa só pode casar uma vez por guild
+                    UNIQUE(guild_id, partner2_id) 
                 )
             """)
             logging.info("Tabela 'marriages' verificada/criada.")
@@ -142,20 +144,21 @@ def init_db():
                     target_id INTEGER NOT NULL,
                     moderator_id INTEGER NOT NULL,
                     reason TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    duration TEXT 
                 )
             """)
             logging.info("Tabela 'moderation_logs' verificada/criada.")
 
-            # ADICIONA A COLUNA 'duration' SE NÃO EXISTIR
+            # ALTER TABLE para adicionar 'duration' SE JÁ EXISTIR
             try:
                 cursor.execute("ALTER TABLE moderation_logs ADD COLUMN duration TEXT;")
-                logging.info("Coluna 'duration' adicionada à tabela 'moderation_logs'.")
+                logging.info("Coluna 'duration' adicionada à tabela 'moderation_logs' (via ALTER TABLE).")
             except sqlite3.OperationalError as e:
                 if "duplicate column name: duration" in str(e):
                     logging.info("Coluna 'duration' já existe na tabela 'moderation_logs'.")
                 else:
-                    logging.error(f"Erro ao adicionar coluna 'duration' à tabela 'moderation_logs': {e}")
+                    logging.error(f"Erro ao adicionar coluna 'duration' à tabela 'moderation_logs': {e}", exc_info=True)
 
             # --- NOVAS TABELAS PARA LOCKDOWN ---
             # Tabela para canais em lockdown (persistência do estado de lockdown)
@@ -163,7 +166,7 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS locked_channels (
                     channel_id INTEGER PRIMARY KEY,
                     guild_id INTEGER NOT NULL,
-                    locked_until_timestamp INTEGER, -- Timestamp Unix opcional para lockdown temporário
+                    locked_until_timestamp INTEGER, 
                     reason TEXT,
                     locked_by_id INTEGER
                 )
@@ -180,16 +183,13 @@ def init_db():
             """)
             logging.info("Tabela 'lockdown_panel_settings' verificada/criada.")
 
-            # --- FIM DAS NOVAS TABELAS ---
-
             conn.commit()
             logging.info("Tabelas do banco de dados verificadas/criadas com sucesso.")
         except sqlite3.Error as e:
-            logging.error(f"Erro ao inicializar o banco de dados: {e}")
+            logging.error(f"Erro ao inicializar o banco de dados: {e}", exc_info=True)
         finally:
             conn.close()
 
-# Exemplo de como você usaria isso em um comando ou evento:
 def execute_query(query, params=(), fetchone=False, fetchall=False):
     """Executa uma query SQL e retorna os resultados, se houver."""
     conn = connect_db()
@@ -197,20 +197,15 @@ def execute_query(query, params=(), fetchone=False, fetchall=False):
         try:
             cursor = conn.cursor()
             cursor.execute(query, params)
-            conn.commit() # Seu execute_query já faz commit por padrão
+            conn.commit()
             if fetchone:
                 return cursor.fetchone()
             if fetchall:
                 return cursor.fetchall()
-            return True # Retorna True para indicar que a operação de escrita foi bem-sucedida
+            return True 
         except sqlite3.Error as e:
-            logging.error(f"Erro ao executar query '{query}' com params {params}: {e}")
-            return False # Retorna False em caso de erro
+            logging.error(f"Erro ao executar query '{query}' com params {params}: {e}", exc_info=True)
+            return False 
         finally:
             conn.close()
-    return False # Retorna False se a conexão não puder ser estabelecida
-
-# Inicializa o DB ao importar este módulo (ou quando main.py chama init_db)
-# if __name__ == '__main__':
-#     init_db()
-#     print("Database initialization test complete.")
+    return False

@@ -1,207 +1,210 @@
+# cogs/moderation/lockdown_core.py
 import discord
-from discord.ext import commands, tasks
-import datetime
-import time
+from discord.ext import commands
 import logging
-import re
-
 from database import execute_query
+import asyncio
+import time
+from typing import Optional 
+from discord import app_commands # Adicionado: Importa app_commands
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-def parse_duration(duration_str: str) -> datetime.timedelta:
-    """Converte uma string de duração (ex: '30m', '1h') em um timedelta."""
-    seconds = 0
-    if not duration_str:
-        raise ValueError("Duração não pode ser vazia.")
-    parts = re.findall(r'(\d+)([smhd])', duration_str.lower())
-    if not parts:
-        raise ValueError("Formato de duração inválido. Use, por exemplo: '30m', '1h', '2d'.")
-    for value, unit in parts:
-        value = int(value)
-        if unit == 's':
-            seconds += value
-        elif unit == 'm':
-            seconds += value * 60
-        elif unit == 'h':
-            seconds += value * 3600
-        elif unit == 'd':
-            seconds += value * 86400
-    if seconds > 2419200: # 28 dias em segundos
-        raise ValueError("A duração máxima para silenciamento é de 28 dias.")
-    return datetime.timedelta(seconds=seconds)
-
+logger = logging.getLogger(__name__)
 
 class LockdownCore(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
-        self.lockdown_check.start()
-        logging.info("LockdownCore cog inicializado.")
+        logger.info("Cog de Lockdown Core inicializada.")
+        self.lockdown_tasks = {} # Para gerenciar lockdowns temporários
 
-    def cog_unload(self):
-        self.lockdown_check.cancel()
-        logging.info("LockdownCore cog descarregado.")
-
-    async def _is_channel_locked(self, channel_id: int) -> bool:
-        """Verifica se um canal está em lockdown no DB."""
-        result = execute_query(
-            "SELECT channel_id FROM locked_channels WHERE channel_id = ?",
-            (channel_id,),
-            fetchone=True
-        )
-        return result is not None
-
-    async def _toggle_lockdown(self, channel: discord.TextChannel, lock: bool, reason: str = "Não especificado", locked_by: discord.Member = None, duration_seconds: int = None):
+    async def _update_channel_permissions(self, channel: discord.TextChannel, locked: bool):
         """
-        Alterna o estado de lockdown de um canal e atualiza o banco de dados.
+        Atualiza as permissões de envio de mensagens para o @everyone.
         """
         everyone_role = channel.guild.default_role
-
-        current_perms = channel.overwrites_for(everyone_role)
-        bot_member = channel.guild.me
-
-        # Verifica as permissões do bot antes de tentar modificar o canal
-        if not (channel.permissions_for(bot_member).manage_roles or channel.permissions_for(bot_member).manage_channels):
-            logging.error(f"Bot sem permissão 'Gerenciar Cargos' ou 'Gerenciar Canais' para alterar permissões em #{channel.name} ({channel.id}).")
-            return False, "Erro: Bot sem permissões necessárias ('Gerenciar Cargos' ou 'Gerenciar Canais') para modificar este canal."
-
-        if lock:
-            current_perms.send_messages = False
-            db_query = "INSERT OR REPLACE INTO locked_channels (channel_id, guild_id, locked_until_timestamp, reason, locked_by_id) VALUES (?, ?, ?, ?, ?)"
-            locked_until = None
-            if duration_seconds:
-                locked_until = int(time.time()) + duration_seconds
-            
-            db_success = execute_query(db_query, (channel.id, channel.guild.id, locked_until, reason, locked_by.id if locked_by else None))
-            if not db_success:
-                logging.error(f"Falha ao registrar lockdown no DB para canal #{channel.name} ({channel.id}).")
-                return False, "Erro no banco de dados ao registrar lockdown."
-            
-            status_message = "bloqueado"
-            log_message = f"Lockdown ativado em #{channel.name} ({channel.id}) por {locked_by.name if locked_by else 'Desconhecido'}. Razão: '{reason}'. Duração: {duration_seconds}s"
+        
+        if locked:
+            # Sobrescrever a permissão de @everyone para remover permissão de enviar mensagens
+            # Permissões.send_messages deve ser False para lockdown
+            await channel.set_permissions(everyone_role, send_messages=False, reason="Lockdown ativado.")
         else:
-            current_perms.send_messages = None # Reseta para o estado neutro, permitindo que as permissões do servidor prevaleçam
-            db_query = "DELETE FROM locked_channels WHERE channel_id = ?"
-            db_success = execute_query(db_query, (channel.id,))
-            if not db_success:
-                logging.error(f"Falha ao remover lockdown do DB para canal #{channel.name} ({channel.id}).")
-                return False, "Erro no banco de dados ao remover lockdown."
+            # Remover a sobrescrita para @everyone ou definir como None (herdar)
+            # Neste caso, queremos definir como None para que o canal volte ao normal
+            # ou herde as permissões da categoria.
+            await channel.set_permissions(everyone_role, send_messages=None, reason="Lockdown desativado.")
+        
+    async def _add_locked_channel_to_db(self, channel_id: int, guild_id: int, locked_until: Optional[int], reason: Optional[str], locked_by_id: int):
+        """Adiciona um canal bloqueado ao banco de dados."""
+        execute_query(
+            "INSERT OR REPLACE INTO locked_channels (channel_id, guild_id, locked_until_timestamp, reason, locked_by_id) VALUES (?, ?, ?, ?, ?)",
+            (channel_id, guild_id, locked_until, reason, locked_by_id)
+        )
+        logger.info(f"Canal {channel_id} do guild {guild_id} adicionado ao DB como bloqueado.")
+
+    async def _remove_locked_channel_from_db(self, channel_id: int):
+        """Remove um canal bloqueado do banco de dados."""
+        execute_query("DELETE FROM locked_channels WHERE channel_id = ?", (channel_id,))
+        logger.info(f"Canal {channel_id} removido do DB de canais bloqueados.")
+
+    @commands.hybrid_command(name="lockdown", description="Ativa o modo de lockdown para o canal atual ou especificado.")
+    @commands.has_permissions(manage_channels=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    @app_commands.describe( # Removido app_commands.describe por enquanto, caso esteja dando erro
+        channel="O canal para ativar o lockdown (padrão: canal atual).",
+        duration="Duração do lockdown (ex: 1h, 30m, 5s).",
+        reason="A razão para o lockdown."
+    )
+    async def lockdown(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None, duration: Optional[str] = None, *, reason: Optional[str] = "Nenhuma razão fornecida."):
+        channel = channel or ctx.channel
+        
+        # Verificar se o canal já está bloqueado no DB
+        if execute_query("SELECT channel_id FROM locked_channels WHERE channel_id = ?", (channel.id,), fetchone=True):
+            return await ctx.send(f"⚠️ O canal {channel.mention} já está em lockdown!")
+
+        locked_until_timestamp = None
+        if duration:
+            seconds = self._parse_duration(duration)
+            if seconds is None:
+                return await ctx.send("❌ Duração inválida. Use formatos como `1h`, `30m`, `5s`.")
+            locked_until_timestamp = int(time.time()) + seconds
             
-            status_message = "desbloqueado"
-            log_message = f"Lockdown desativado em #{channel.name} ({channel.id})."
+        await self._update_channel_permissions(channel, True)
+        
+        # Adicionar ao DB
+        await self._add_locked_channel_to_db(channel.id, ctx.guild.id, locked_until_timestamp, reason, ctx.author.id)
 
-        try:
-            await channel.set_permissions(everyone_role, overwrite=current_perms, reason=reason)
-            logging.info(log_message)
-            return True, status_message
-        except discord.Forbidden:
-            logging.error(f"Bot sem permissão para mudar as permissões em #{channel.name} ({channel.id}). Certifique-se de que o bot tem 'Gerenciar Cargos' ou 'Gerenciar Canais' e que seu cargo está acima de @everyone.", exc_info=True)
-            return False, "Erro: Não tenho permissão para modificar as permissões deste canal. Verifique as permissões 'Gerenciar Cargos' e 'Gerenciar Canais' para o cargo do bot e a hierarquia de cargos."
-        except Exception as e:
-            # --- NOVOS LOGS DE DEPURACÃO ---
-            logging.error(f"DEBUG_TOGGLE_ERROR: Tipo da exceção: {type(e)}")
-            logging.error(f"DEBUG_TOGGLE_ERROR: Objeto da exceção: {e}")
-            # --- FIM DOS NOVOS LOGS ---
-            logging.error(f"Erro inesperado ao alternar lockdown em #{channel.name} ({channel.id}): {e}", exc_info=True)
-            return False, f"Erro interno: {e}" 
-
-    async def _send_lockdown_message(self, channel: discord.TextChannel, is_locked: bool, reason: str, duration_seconds: int = None):
-        """Envia uma mensagem informativa sobre o estado de lockdown."""
-        embed = discord.Embed()
-        if is_locked:
-            embed.title = "🔒 Canal Bloqueado"
-            embed.description = f"Este canal foi bloqueado. Ninguém pode enviar mensagens aqui."
-            embed.color = discord.Color.red()
-            if reason:
-                embed.add_field(name="Motivo", value=reason, inline=False)
-            if duration_seconds:
-                duration_str = str(datetime.timedelta(seconds=duration_seconds))
-                embed.add_field(name="Duração", value=f"Por `{duration_str}`", inline=False)
-            embed.set_footer(text="Aguarde até ser desbloqueado por um moderador ou automaticamente.")
+        if duration:
+            await ctx.send(f"🔒 {channel.mention} colocado em lockdown por {duration} devido a: {reason}. Eu irei desbloqueá-lo automaticamente.")
+            # Iniciar tarefa de desbloqueio agendado
+            self.lockdown_tasks[channel.id] = self.bot.loop.create_task(
+                self._timed_unlock(channel, seconds)
+            )
         else:
-            embed.title = "🔓 Canal Desbloqueado"
-            embed.description = "Este canal foi desbloqueado! Agora você pode enviar mensagens novamente."
-            embed.color = discord.Color.green()
-            if reason:
-                embed.add_field(name="Motivo do desbloqueio", value=reason, inline=False)
-            embed.set_footer(text="Obrigado pela paciência!")
-
-        try:
-            await channel.send(embed=embed)
-        except discord.Forbidden:
-            logging.error(f"Bot sem permissão para enviar mensagem em #{channel.name} ({channel.id}).")
-        except Exception as e:
-            logging.error(f"Erro ao enviar mensagem de lockdown/desbloqueio em #{channel.name} ({channel.id}): {e}", exc_info=True)
-
-    @tasks.loop(minutes=1)
-    async def lockdown_check(self):
-        await self.bot.wait_until_ready()
-
-        current_time = int(time.time())
-        expired_lockdowns = execute_query(
-            "SELECT channel_id, guild_id, reason FROM locked_channels WHERE locked_until_timestamp IS NOT NULL AND locked_until_timestamp <= ?",
-            (current_time,),
-            fetchall=True
-        )
-
-        if expired_lockdowns:
-            logging.info(f"Encontrados {len(expired_lockdowns)} canais com lockdown expirado.")
-            for channel_id, guild_id, reason in expired_lockdowns:
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    logging.warning(f"Guild {guild_id} não encontrada para lockdown expirado do canal {channel_id}. Removendo do DB.")
-                    execute_query("DELETE FROM locked_channels WHERE channel_id = ?", (channel_id,), commit=True)
-                    continue
-
-                channel = guild.get_channel(channel_id)
-                if not channel or not isinstance(channel, discord.TextChannel):
-                    logging.warning(f"Canal {channel_id} não encontrado ou não é de texto para lockdown expirado na guild {guild_id}. Removendo do DB.")
-                    execute_query("DELETE FROM locked_channels WHERE channel_id = ?", (channel_id,), commit=True)
-                    continue
-                
-                logging.info(f"Desbloqueando canal {channel.name} ({channel.id}) automaticamente.")
-                success, _ = await self._toggle_lockdown(channel, False, f"Lockdown automático expirado. Motivo original: {reason}")
-                if success:
-                    await self._send_lockdown_message(channel, False, f"Lockdown automático expirado.")
+            await ctx.send(f"🔒 {channel.mention} colocado em lockdown indefinidamente devido a: {reason}.")
+        logger.info(f"Canal {channel.id} em {ctx.guild.id} bloqueado por {ctx.author.id}. Duração: {duration}, Razão: {reason}")
 
 
-    @lockdown_check.before_loop
-    async def before_lockdown_check(self):
-        await self.bot.wait_until_ready()
-        logging.info("Iniciando verificação de lockdown persistente...")
-        all_locked_channels = execute_query(
-            "SELECT channel_id, guild_id, reason, locked_by_id, locked_until_timestamp FROM locked_channels",
-            fetchall=True
-        )
-        if all_locked_channels:
-            logging.info(f"Encontrados {len(all_locked_channels)} canais com lockdown persistente no DB.")
-            for channel_id, guild_id, reason, locked_by_id, locked_until_timestamp in all_locked_channels:
-                guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    logging.warning(f"Guild {guild_id} não encontrada para canal {channel_id} no carregamento. Removendo do DB.")
-                    execute_query("DELETE FROM locked_channels WHERE channel_id = ?", (channel_id,), commit=True)
-                    continue
+    @commands.hybrid_command(name="unlock", description="Desativa o modo de lockdown para o canal atual ou especificado.")
+    @commands.has_permissions(manage_channels=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    @app_commands.describe( # Removido app_commands.describe por enquanto, caso esteja dando erro
+        channel="O canal para desativar o lockdown (padrão: canal atual)."
+    )
+    async def unlock(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        channel = channel or ctx.channel
 
-                channel = guild.get_channel(channel_id)
-                if not channel or not isinstance(channel, discord.TextChannel):
-                    logging.warning(f"Canal {channel_id} não encontrado ou não é de texto no carregamento para guild {guild_id}. Removendo do DB.")
-                    execute_query("DELETE FROM locked_channels WHERE channel_id = ?", (channel_id,), commit=True)
-                    continue
-                
-                # Se o lockdown já expirou na hora do carregamento, desbloqueia e remove do DB
-                if locked_until_timestamp and locked_until_timestamp <= int(time.time()):
-                    logging.info(f"Lockdown para canal {channel.name} ({channel.id}) já expirou no carregamento. Desbloqueando.")
-                    await self._toggle_lockdown(channel, False, f"Lockdown expirado na reinicialização do bot. Motivo original: {reason}")
+        # Verificar se o canal está bloqueado no DB
+        if not execute_query("SELECT channel_id FROM locked_channels WHERE channel_id = ?", (channel.id,), fetchone=True):
+            return await ctx.send(f"⚠️ O canal {channel.mention} não está em lockdown!")
+
+        await self._update_channel_permissions(channel, False)
+        await self._remove_locked_channel_from_db(channel.id)
+
+        # Cancelar tarefa agendada se existir
+        if channel.id in self.lockdown_tasks:
+            self.lockdown_tasks[channel.id].cancel()
+            del self.lockdown_tasks[channel.id]
+
+        await ctx.send(f"🔓 {channel.mention} foi desbloqueado.")
+        logger.info(f"Canal {channel.id} em {ctx.guild.id} desbloqueado por {ctx.author.id}.")
+
+    async def _timed_unlock(self, channel: discord.TextChannel, seconds: int):
+        await asyncio.sleep(seconds)
+        if execute_query("SELECT channel_id FROM locked_channels WHERE channel_id = ?", (channel.id,), fetchone=True):
+            await self._update_channel_permissions(channel, False)
+            await self._remove_locked_channel_from_db(channel.id)
+            try:
+                await channel.send(f"🔓 O lockdown deste canal ({channel.mention}) foi automaticamente desativado após {self._format_seconds(seconds)}.")
+            except discord.Forbidden:
+                logger.warning(f"Não foi possível enviar mensagem de desbloqueio para {channel.id} após lockdown temporário.")
+            except Exception as e:
+                logger.error(f"Erro ao enviar mensagem de desbloqueio para {channel.id}: {e}", exc_info=True)
+            logger.info(f"Lockdown temporário do canal {channel.id} em {channel.guild.id} finalizado.")
+        if channel.id in self.lockdown_tasks:
+            del self.lockdown_tasks[channel.id]
+
+    def _parse_duration(self, duration_str: str) -> Optional[int]:
+        """Converte uma string de duração (ex: '1h', '30m', '5s') em segundos."""
+        total_seconds = 0
+        current_num = ""
+        for char in duration_str:
+            if char.isdigit():
+                current_num += char
+            else:
+                if not current_num:
+                    return None # Formato inválido
+                num = int(current_num)
+                if char == 's':
+                    total_seconds += num
+                elif char == 'm':
+                    total_seconds += num * 60
+                elif char == 'h':
+                    total_seconds += num * 3600
+                elif char == 'd':
+                    total_seconds += num * 86400
                 else:
-                    logging.info(f"Aplicando lockdown persistente em #{channel.name} ({channel.id}).")
-                    success, _ = await self._toggle_lockdown(channel, True, reason, guild.get_member(locked_by_id) if locked_by_id else None, 
-                                                           (locked_until_timestamp - int(time.time())) if locked_until_timestamp else None)
-                    if not success:
-                        logging.error(f"Falha ao aplicar lockdown persistente em #{channel.name} ({channel.id}).")
+                    return None # Unidade inválida
+                current_num = ""
+        return total_seconds
+
+    def _format_seconds(self, seconds: int) -> str:
+        """Formata segundos em uma string legível (ex: '1h 30m')."""
+        if seconds < 60:
+            return f"{seconds}s"
+        elif seconds < 3600:
+            minutes = seconds // 60
+            remaining_seconds = seconds % 60
+            return f"{minutes}m {remaining_seconds}s" if remaining_seconds > 0 else f"{minutes}m"
         else:
-            logging.info("Nenhum canal em lockdown persistente para carregar.")
+            hours = seconds // 3600
+            remaining_minutes = (seconds % 3600) // 60
+            return f"{hours}h {remaining_minutes}m" if remaining_minutes > 0 else f"{hours}h"
+
+    # Listener para carregar estados de lockdown persistentes ao iniciar
+    @commands.Cog.listener()
+    async def on_ready(self):
+        logger.info("Verificando canais em lockdown persistentes...")
+        locked_channels_data = execute_query("SELECT channel_id, locked_until_timestamp FROM locked_channels", fetchall=True)
+        if locked_channels_data:
+            current_time = int(time.time())
+            for channel_id, locked_until_timestamp in locked_channels_data:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    logger.warning(f"Canal em lockdown {channel_id} não encontrado, removendo do DB.")
+                    await self._remove_locked_channel_from_db(channel_id)
+                    continue
+
+                if locked_until_timestamp and locked_until_timestamp <= current_time:
+                    # O tempo de lockdown já expirou, desbloquear e remover
+                    await self._update_channel_permissions(channel, False)
+                    await self._remove_locked_channel_from_db(channel_id)
+                    try:
+                        await channel.send(f"🔓 O lockdown deste canal ({channel.mention}) foi automaticamente desativado ao reiniciar o bot (tempo expirado).")
+                    except discord.Forbidden:
+                        logger.warning(f"Não foi possível enviar mensagem de desbloqueio para {channel.id} após reiniciar o bot (tempo expirado).")
+                    except Exception as e:
+                        logger.error(f"Erro ao enviar mensagem de desbloqueio para {channel.id}: {e}", exc_info=True)
+                    logger.info(f"Lockdown temporário do canal {channel.id} em {channel.guild.id} finalizado.")
+                else:
+                    # Ainda em lockdown, garantir permissões e agendar desbloqueio se temporário
+                    await self._update_channel_permissions(channel, True)
+                    if locked_until_timestamp:
+                        remaining_seconds = locked_until_timestamp - current_time
+                        if remaining_seconds > 0:
+                            self.lockdown_tasks[channel_id] = self.bot.loop.create_task(
+                                self._timed_unlock(channel, remaining_seconds)
+                            )
+                            logger.info(f"Lockdown temporário para {channel.id} restabelecido por {remaining_seconds} segundos.")
+                        else: # Caso por algum motivo o timestamp seja futuro mas menor que 0
+                             await self._update_channel_permissions(channel, False)
+                             await self._remove_locked_channel_from_db(channel_id)
+                             logger.info(f"Lockdown para {channel.id} expirou durante a inicialização e foi desativado.")
+                    logger.info(f"Canal {channel.id} em {channel.guild.id} carregado como em lockdown.")
+        else:
+            logger.info("Nenhum canal em lockdown persistente encontrado.")
 
 
-async def setup(bot: commands.Bot):
+# Esta função é CRUCIAL para o bot carregar o cog.
+async def setup(bot):
+    """Adiciona o cog de Lockdown Core ao bot."""
     await bot.add_cog(LockdownCore(bot))
-    logging.info("LockdownCore cog adicionado ao bot.")
+    logger.info("Cog de Lockdown Core configurada e adicionada ao bot.")

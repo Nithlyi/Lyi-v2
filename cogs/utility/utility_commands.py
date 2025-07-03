@@ -1,28 +1,33 @@
 import discord
 from discord.ext import commands
-from discord import app_commands, ui # Importa ui para usar componentes
+from discord import app_commands, ui
 import datetime
 import logging
 
-from database import execute_query # Mantido caso precise para logs ou futuras extensões
-
-# Configuração de logging
+# Sua configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Nova View para o botão de download do avatar
+# Mantido caso precise para logs ou futuras extensões (se database.py existir)
+# from database import execute_query 
+
 class AvatarDownloadView(ui.View):
     def __init__(self, avatar_url: str):
-        super().__init__(timeout=600) # Timeout de 10 minutos para o botão
-        # Adiciona um botão de link. O URL é o link direto para download.
-        self.add_item(ui.Button(label="Baixar Avatar", style=discord.ButtonStyle.link, url=avatar_url, emoji="💾"))
+        super().__init__(timeout=600) # Timeout de 10 minutos (600 segundos)
+        self.avatar_url = avatar_url
+        # O botão é adicionado aqui para que possamos referenciá-lo facilmente no timeout
+        self.download_button = ui.Button(label="Baixar Avatar", style=discord.ButtonStyle.link, url=avatar_url, emoji="💾")
+        self.add_item(self.download_button)
+        self.message = None # Para armazenar a mensagem após o envio
 
     async def on_timeout(self):
-        # Desabilita o botão quando o tempo limite expira
-        for item in self.children:
-            item.disabled = True
-        if self.message: # Se a mensagem foi armazenada
+        # Desabilita o botão e atualiza a mensagem para indicar o timeout
+        if self.message:
+            self.download_button.disabled = True
+            self.download_button.label = "Link Expirado" # Muda o texto do botão
+            # Remove o emoji, se desejar, ou mantenha
+            # self.download_button.emoji = None 
             await self.message.edit(view=self)
-
+            logging.info(f"Botão de avatar para {self.avatar_url} expirou.")
 
 class UtilityCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -31,32 +36,35 @@ class UtilityCommands(commands.Cog):
     @app_commands.command(name="avatar", description="Exibe o avatar de um usuário e oferece a opção de download.")
     @app_commands.describe(member="O membro cujo avatar você deseja ver (opcional, padrão: você).")
     async def avatar(self, interaction: discord.Interaction, member: discord.Member = None):
-        await interaction.response.defer(ephemeral=True) # Deferir para evitar timeout
+        # A resposta efêmera inicial pode ser deferida para não mostrar "O bot está pensando..."
+        await interaction.response.defer(ephemeral=False) # Mudado para False para que a mensagem e o botão sejam públicos
 
         target_member = member or interaction.user # Se nenhum membro for especificado, usa o autor
+
+        # Pega a URL do avatar. Usa um avatar padrão do Discord se não houver um.
+        avatar_url = target_member.display_avatar.url if target_member.display_avatar else target_member.default_avatar.url
 
         embed = discord.Embed(
             title=f"Avatar de {target_member.display_name}",
             color=discord.Color.blue()
         )
-        embed.set_image(url=target_member.display_avatar.url) # Define o avatar como a imagem principal do embed
+        embed.set_image(url=avatar_url) # Define o avatar como a imagem principal do embed
         embed.set_footer(text=f"ID do Usuário: {target_member.id}")
 
         # Cria a view com o botão de download
-        view = AvatarDownloadView(target_member.display_avatar.url)
+        view = AvatarDownloadView(avatar_url)
 
         # Envia a mensagem com o embed e a view (botão)
-        # ephemeral=False para que o botão seja visível e clicável por todos
-        # Armazena a mensagem na view para poder desabilitar o botão no timeout
-        await interaction.followup.send(embed=embed, view=view, ephemeral=False)
-        view.message = await interaction.original_response() # Armazena a mensagem para o timeout da view
-        
+        # É importante armazenar a mensagem retornada pelo followup.send
+        sent_message = await interaction.followup.send(embed=embed, view=view, ephemeral=False)
+        view.message = sent_message # Armazena a mensagem na view para o timeout
+
         logging.info(f"Comando /avatar usado por {interaction.user.id} para {target_member.id} na guild {interaction.guild.id}.")
 
 
     @app_commands.command(name="serverinfo", description="Exibe informações detalhadas sobre o servidor.")
     async def serverinfo(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False) # Pode ser público, não há problema
 
         guild = interaction.guild
         if not guild:
@@ -89,31 +97,48 @@ class UtilityCommands(commands.Cog):
         embed.add_field(name="Criado em", value=f"<t:{created_at_unix}:F>", inline=False)
         
         embed.add_field(name="Membros", value=(
-            f"Total: {total_members}\n"
-            f"Humanos: {human_members}\n"
-            f"Bots: {bot_members}"
+            f"Total: **{total_members}**\n"
+            f"Humanos: **{human_members}**\n"
+            f"Bots: **{bot_members}**"
         ), inline=True)
         
         embed.add_field(name="Canais", value=(
-            f"Total: {total_channels}\n"
-            f"Texto: {text_channels}\n"
-            f"Voz: {voice_channels}\n"
-            f"Categorias: {categories}"
+            f"Total: **{total_channels}**\n"
+            f"Texto: **{text_channels}**\n"
+            f"Voz: **{voice_channels}**\n"
+            f"Categorias: **{categories}**"
         ), inline=True)
 
-        embed.add_field(name="Cargos", value=len(guild.roles), inline=True)
-        embed.add_field(name="Nível de Boost", value=f"Nível {guild.premium_tier} ({guild.premium_subscription_count} boosts)", inline=True)
-        embed.add_field(name="Nível de Verificação", value=str(guild.verification_level).replace('_', ' ').title(), inline=True)
-        embed.add_field(name="Notificações Padrão", value=str(guild.default_notifications).replace('_', ' ').title(), inline=True)
+        embed.add_field(name="Cargos", value=f"**{len(guild.roles)}**", inline=True)
+        # Melhorando a legibilidade do nível de boost
+        boost_tier = f"Nível {guild.premium_tier} ({guild.premium_subscription_count} boosts)" if guild.premium_subscription_count else "Nenhum boost"
+        embed.add_field(name="Nível de Boost", value=boost_tier, inline=True)
+        
+        # Mapeamento para nomes de verificação mais amigáveis
+        verification_levels = {
+            discord.VerificationLevel.none: "Nenhum",
+            discord.VerificationLevel.low: "Baixo (Email verificado)",
+            discord.VerificationLevel.medium: "Médio (Registrado há >5 mins)",
+            discord.VerificationLevel.high: "Alto (No servidor há >10 mins)",
+            discord.VerificationLevel.highest: "Mais Alto (Telefone verificado)"
+        }
+        embed.add_field(name="Nível de Verificação", value=verification_levels.get(guild.verification_level, "Desconhecido"), inline=True)
+        
+        # Mapeamento para nomes de notificação mais amigáveis
+        notification_levels = {
+            discord.NotificationLevel.all_messages: "Todas as Mensagens",
+            discord.NotificationLevel.only_mentions: "Somente Menções"
+        }
+        embed.add_field(name="Notificações Padrão", value=notification_levels.get(guild.default_notifications, "Desconhecido"), inline=True)
 
         await interaction.followup.send(embed=embed, ephemeral=False)
         logging.info(f"Comando /serverinfo usado por {interaction.user.id} na guild {interaction.guild.id}.")
 
 
     @app_commands.command(name="userinfo", description="Exibe informações detalhadas sobre um usuário.")
-    @app_commands.describe(member="O membro cujo informações você deseja ver (opcional, padrão: você).")
+    @app_commands.describe(member="O membro cujas informações você deseja ver (opcional, padrão: você).")
     async def userinfo(self, interaction: discord.Interaction, member: discord.Member = None):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False) # Pode ser público, não há problema
 
         target_member = member or interaction.user # Se nenhum membro for especificado, usa o autor
 
@@ -131,7 +156,7 @@ class UtilityCommands(commands.Cog):
         )
         embed.set_thumbnail(url=target_member.display_avatar.url)
 
-        embed.add_field(name="Nome de Usuário", value=target_member.name, inline=True)
+        embed.add_field(name="Nome de Usuário", value=f"@{target_member.name}", inline=True) # Adiciona @ para melhor visualização
         embed.add_field(name="ID do Usuário", value=target_member.id, inline=True)
         embed.add_field(name="Bot?", value="Sim" if target_member.bot else "Não", inline=True)
         
@@ -141,11 +166,13 @@ class UtilityCommands(commands.Cog):
         
         if isinstance(target_member, discord.Member):
             # Cargos (excluindo @everyone e ordenando por posição)
-            roles = sorted([role for role in target_member.roles if role.name != "@everyone"], key=lambda r: r.position, reverse=True)
-            if roles:
+            # Verifica se há outros cargos além de @everyone
+            roles_excluding_everyone = [role for role in target_member.roles if role.name != "@everyone"]
+            if roles_excluding_everyone:
+                roles = sorted(roles_excluding_everyone, key=lambda r: r.position, reverse=True)
                 embed.add_field(name="Cargos", value=", ".join([role.mention for role in roles]), inline=False)
             else:
-                embed.add_field(name="Cargos", value="Nenhum cargo especial.", inline=False)
+                embed.add_field(name="Cargos", value="Nenhum cargo especial (apenas @everyone)", inline=False) # Mais específico
 
             # Cargo mais alto (excluindo @everyone)
             top_role = target_member.top_role
@@ -166,4 +193,3 @@ class UtilityCommands(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(UtilityCommands(bot))
-

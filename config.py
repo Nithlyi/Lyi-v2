@@ -1,12 +1,14 @@
+# config.py
+
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv() # Carrega as variáveis do arquivo .env
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+COMMAND_PREFIX = "!" # Ou o prefixo que preferir
+TEST_GUILD_ID = 1387502748387377223 # Substitua pelo ID do seu servidor de testes (opcional)
 
-# MUDANÇA AQUI: Lê do ambiente ou usa "!" como padrão
-COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
-
-# MUDANÇA AQUI: Lê do ambiente, se existir, senão é None
-TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
+# --- Adicione esta linha ---
+DISCORD_BOT_APPLICATION_ID = os.getenv("DISCORD_BOT_APPLICATION_ID")
+# ---------------------------

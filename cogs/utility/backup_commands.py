@@ -1,459 +1,140 @@
 import discord
 from discord.ext import commands
-from discord import app_commands, ui # Import ui
-import json
-import os
-import datetime
-import logging
-import asyncio # Para usar bot.wait_for
+from discord import app_commands
+from discord.errors import HTTPException # Adicione esta importação
+import asyncio # Adicione esta importação
 
-# Configuração de logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Supondo que você tem seu database.py no nível superior ou em um módulo acessível
+# Ajuste o caminho de importação conforme a estrutura real do seu projeto.
+# Por exemplo, se database.py estiver na raiz do projeto:
+# from database import connect_db, execute_query, init_db
+# Ou se estiver em um pacote específico, como 'utils':
+# from utils.database import connect_db, execute_query, init_db
 
-# --- Funções Auxiliares para Lógica de Backup/Restauração ---
-async def _perform_backup_logic(interaction: discord.Interaction, guild: discord.Guild):
-    """Lógica central para criar um backup da estrutura do servidor."""
-    backup_data = {
-        "guild_id": guild.id,
-        "guild_name": guild.name,
-        "roles": [],
-        "categories": [],
-        "text_channels": [],
-        "voice_channels": [],
-        "timestamp": datetime.datetime.now().isoformat()
-    }
+# Vou usar um placeholder para as funções do banco de dados,
+# já que você não quer modificá-lo.
+# Certifique-se de que essas funções estão corretamente importadas do seu database.py.
 
-    # Backup de Cargos
-    for role in guild.roles:
-        # Ignora o cargo @everyone para evitar duplicação ou problemas na restauração,
-        # pois ele é recriado automaticamente pelo Discord.
-        if role == guild.default_role:
-            continue
-        backup_data["roles"].append({
-            "name": role.name,
-            "permissions": role.permissions.value, # Salva o valor inteiro das permissões
-            "color": role.color.value, # Salva o valor inteiro da cor
-            "hoist": role.hoist,
-            "mentionable": role.mentionable,
-            "position": role.position,
-            "id": role.id # Inclui o ID original para mapeamento durante a restauração
-        })
-    # Ordena os cargos por posição para tentar recriar na ordem correta
-    backup_data["roles"].sort(key=lambda x: x["position"], reverse=True)
+# Exemplo de placeholders (adapte com suas funções reais do database.py)
+def connect_db():
+    print("Conectando ao DB (placeholder)...")
+    # Sua lógica real de conexão aqui
+    return None
 
-    # Backup de Canais e Categorias
-    for category in guild.categories:
-        category_data = {
-            "name": category.name,
-            "id": category.id, # Inclui o ID original para mapeamento
-            "position": category.position,
-            "overwrites": []
-        }
-        for target, overwrite_perms in category.overwrites.items():
-            target_id = target.id
-            target_type = "role" if isinstance(target, discord.Role) else "member"
-            try:
-                category_data["overwrites"].append({
-                    "id": target_id,
-                    "type": target_type,
-                    "allow": overwrite_perms.allow.value, 
-                    "deny": overwrite_perms.deny.value    
-                })
-            except AttributeError as e:
-                logging.error(f"Erro ao obter permissões de sobrescrita para categoria '{category.name}' (Target ID: {target_id}, Tipo: {target_type}). Erro: {e}. Tipo de overwrite_perms: {type(overwrite_perms)}")
-                # Se ocorrer um erro, esta sobrescrita será ignorada para evitar travar o backup.
-                # Você pode adicionar lógica para lidar com isso, como definir permissões padrão.
-        backup_data["categories"].append(category_data)
+def execute_query(query, params=(), fetchone=False, fetchall=False):
+    print(f"Executando query (placeholder): {query} com {params}")
+    # Sua lógica real de execução de query aqui
+    return None
 
-        for channel in category.channels:
-            channel_data = {
-                "name": channel.name,
-                "position": channel.position,
-                "topic": channel.topic if isinstance(channel, discord.TextChannel) else None,
-                "bitrate": channel.bitrate if isinstance(channel, discord.VoiceChannel) else None,
-                "user_limit": channel.user_limit if isinstance(channel, discord.VoiceChannel) else None,
-                "nsfw": channel.nsfw if isinstance(channel, discord.TextChannel) else None,
-                "slowmode_delay": channel.slowmode_delay if isinstance(channel, discord.TextChannel) else None,
-                "overwrites": [],
-                "id": channel.id, # Inclui o ID original
-                "category_id": category.id, # Link para o ID original da categoria
-                "type": "text_channel" if isinstance(channel, discord.TextChannel) else "voice_channel" # Adiciona o tipo de canal
-            }
-            for target, overwrite_perms in channel.overwrites.items():
-                target_id = target.id
-                target_type = "role" if isinstance(target, discord.Role) else "member"
-                try:
-                    channel_data["overwrites"].append({
-                        "id": target_id,
-                        "type": target_type,
-                        "allow": overwrite_perms.allow.value, 
-                        "deny": overwrite_perms.deny.value    
-                    })
-                except AttributeError as e:
-                    logging.error(f"Erro ao obter permissões de sobrescrita para canal '{channel.name}' (Target ID: {target_id}, Tipo: {target_type}). Erro: {e}. Tipo de overwrite_perms: {type(overwrite_perms)}")
-                    # Se ocorrer um erro, esta sobrescrita será ignorada.
-            
-            if isinstance(channel, discord.TextChannel):
-                backup_data["text_channels"].append(channel_data)
-            elif isinstance(channel, discord.VoiceChannel):
-                backup_data["voice_channels"].append(channel_data)
-    
-    # Canais sem categoria (que não estão dentro de uma categoria)
-    for channel in guild.channels:
-        if channel.category is None and not isinstance(channel, discord.CategoryChannel):
-            channel_data = {
-                "name": channel.name,
-                "position": channel.position,
-                "topic": channel.topic if isinstance(channel, discord.TextChannel) else None,
-                "bitrate": channel.bitrate if isinstance(channel, discord.VoiceChannel) else None,
-                "user_limit": channel.user_limit if isinstance(channel, discord.VoiceChannel) else None,
-                "nsfw": channel.nsfw if isinstance(channel, discord.TextChannel) else None,
-                "slowmode_delay": channel.slowmode_delay if isinstance(channel, discord.TextChannel) else None,
-                "overwrites": [],
-                "id": channel.id, # Inclui o ID original
-                "category_id": None, # Sem categoria
-                "type": "text_channel" if isinstance(channel, discord.TextChannel) else "voice_channel" # Adiciona o tipo de canal
-            }
-            for target, overwrite_perms in channel.overwrites.items():
-                target_id = target.id
-                target_type = "role" if isinstance(target, discord.Role) else "member"
-                try:
-                    channel_data["overwrites"].append({
-                        "id": target_id,
-                        "type": target_type,
-                        "allow": overwrite_perms.allow.value, 
-                        "deny": overwrite_perms.deny.value    
-                    })
-                except AttributeError as e:
-                    logging.error(f"Erro ao obter permissões de sobrescrita para canal sem categoria '{channel.name}' (Target ID: {target_id}, Tipo: {target_type}). Erro: {e}. Tipo de overwrite_perms: {type(overwrite_perms)}")
-                    # Se ocorrer um erro, esta sobrescrita será ignorada.
-
-            if isinstance(channel, discord.TextChannel):
-                backup_data["text_channels"].append(channel_data)
-            elif isinstance(channel, discord.VoiceChannel):
-                backup_data["voice_channels"].append(channel_data)
-
-    # Cria a pasta de backups se não existir
-    backup_dir = "server_backups"
-    os.makedirs(backup_dir, exist_ok=True)
-
-    # Salva o backup em um arquivo JSON
-    filename = f"{backup_dir}/{guild.id}_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(backup_data, f, ensure_ascii=False, indent=4)
-    
-    logging.info(f"Backup da estrutura do servidor {guild.name} ({guild.id}) criado em {filename}")
-    return filename
-
-async def _perform_restore_logic(interaction: discord.Interaction, backup_data: dict):
-    """Lógica central para restaurar a estrutura do servidor a partir de dados de backup."""
-    guild = interaction.guild
-
-    # Verifica se o backup pertence ao servidor atual
-    if backup_data.get("guild_id") != guild.id:
-        await interaction.followup.send("Este arquivo de backup não pertence a este servidor. Cancelando.", ephemeral=True)
-        return
-
-    await interaction.followup.send("Iniciando restauração da estrutura do servidor. Isso pode levar um tempo...", ephemeral=True)
-
-    role_id_map = {} # Mapeia IDs de cargos antigos para novos IDs
-    category_id_map = {} # Mapeia IDs de categorias antigas para novos IDs
-    
-    # Restauração de Cargos
-    existing_roles_map = {role.name: role for role in guild.roles}
-
-    for role_data in backup_data.get("roles", []):
-        role_name = role_data["name"]
-        
-        # Se o cargo já existe, tenta atualizá-lo. Caso contrário, cria um novo.
-        if role_name in existing_roles_map:
-            new_role = existing_roles_map[role_name]
-            try:
-                await new_role.edit(
-                    permissions=discord.Permissions(role_data["permissions"]),
-                    color=discord.Color(role_data["color"]),
-                    hoist=role_data["hoist"],
-                    mentionable=role_data["mentionable"],
-                    reason="Restauração de backup"
-                )
-                logging.info(f"Cargo existente '{role_name}' atualizado.")
-            except Exception as e:
-                logging.warning(f"Não foi possível atualizar o cargo existente '{role_name}': {e}")
-            role_id_map[role_data.get("id")] = new_role.id
-        else:
-            try:
-                new_role = await guild.create_role(
-                    name=role_name,
-                    permissions=discord.Permissions(role_data["permissions"]),
-                    color=discord.Color(role_data["color"]),
-                    hoist=role_data["hoist"],
-                    mentionable=role_data["mentionable"],
-                    reason="Restauração de backup"
-                )
-                logging.info(f"Cargo '{role_name}' criado.")
-                role_id_map[role_data.get("id")] = new_role.id
-            except Exception as e:
-                logging.error(f"Não foi possível criar o cargo '{role_name}': {e}")
-    
-    # Ajustar posições dos cargos após a criação/atualização
-    for role_data in backup_data.get("roles", []):
-        if role_data["name"] == "@everyone":
-            continue
-        role_id = role_id_map.get(role_data.get("id"))
-        if role_id:
-            role = guild.get_role(role_id)
-            if role and role.position != role_data["position"]:
-                try:
-                    await role.edit(position=role_data["position"], reason="Ajuste de posição pós-restauração")
-                    logging.info(f"Posição do cargo '{role.name}' ajustada para {role_data['position']}.")
-                except Exception as e:
-                    logging.warning(f"Não foi possível ajustar a posição do cargo '{role.name}' para {role_data['position']}: {e}")
-
-    # Restauração de Categorias
-    for category_data in backup_data.get("categories", []):
-        overwrites = {}
-        for ow in category_data["overwrites"]:
-            target = None
-            if ow["type"] == "role":
-                mapped_id = role_id_map.get(ow["id"])
-                if mapped_id:
-                    target = guild.get_role(mapped_id)
-                else:
-                    # Fallback: tenta encontrar o cargo pelo nome se o ID mapeado não foi encontrado
-                    # Nota: O backup não salva o nome do cargo para overwrites, apenas o ID.
-                    # Se o ID não for mapeado, e o cargo não existir, não podemos encontrá-lo pelo nome aqui.
-                    # Isso é uma limitação se o cargo foi deletado e recriado com outro ID mas o mesmo nome.
-                    pass 
-            elif ow["type"] == "member":
-                target = guild.get_member(ow["id"])
-            
-            if target:
-                perm_allow = discord.Permissions(ow["allow"])
-                perm_deny = discord.Permissions(ow["deny"])
-                overwrites[target] = discord.PermissionOverwrite.from_pair(perm_allow, perm_deny)
-            else:
-                logging.warning(f"Alvo de overwrite não encontrado (ID: {ow['id']}, Tipo: {ow['type']}) para categoria '{category_data['name']}'. Ignorando overwrite.")
-
-        try:
-            new_category = await guild.create_category(
-                name=category_data["name"],
-                position=category_data["position"],
-                overwrites=overwrites,
-                reason="Restauração de backup"
-            )
-            logging.info(f"Categoria '{category_data['name']}' criada.")
-            category_id_map[category_data.get("id")] = new_category.id
-        except Exception as e:
-            logging.error(f"Não foi possível criar a categoria '{category_data['name']}': {e}")
-    
-    # Restauração de Canais (Texto e Voz)
-    # Combina canais de texto e voz para iterar sobre eles
-    for channel_data in backup_data.get("text_channels", []) + backup_data.get("voice_channels", []):
-        overwrites = {}
-        for ow in channel_data["overwrites"]:
-            target = None
-            if ow["type"] == "role":
-                mapped_id = role_id_map.get(ow["id"])
-                if mapped_id:
-                    target = guild.get_role(mapped_id)
-                else:
-                    # Fallback: tenta encontrar o cargo pelo nome se o ID mapeado não foi encontrado
-                    pass
-            elif ow["type"] == "member":
-                target = guild.get_member(ow["id"])
-            
-            if target:
-                perm_allow = discord.Permissions(ow["allow"])
-                perm_deny = discord.Permissions(ow["deny"])
-                overwrites[target] = discord.PermissionOverwrite.from_pair(perm_allow, perm_deny)
-            else:
-                logging.warning(f"Alvo de overwrite não encontrado (ID: {ow['id']}, Tipo: {ow['type']}) para canal '{channel_data['name']}'. Ignorando overwrite.")
-
-        category = None
-        if channel_data.get("category_id"):
-            mapped_category_id = category_id_map.get(channel_data["category_id"])
-            if mapped_category_id:
-                category = guild.get_channel(mapped_category_id)
-                if not isinstance(category, discord.CategoryChannel):
-                    category = None # Garante que é uma categoria válida
-            else:
-                logging.warning(f"Categoria mapeada não encontrada para canal '{channel_data['name']}'. Criando sem categoria.")
-
-        try:
-            # Verifica o tipo de canal para criar corretamente
-            if channel_data["type"] == "text_channel": 
-                await guild.create_text_channel(
-                    name=channel_data["name"],
-                    position=channel_data["position"],
-                    topic=channel_data.get("topic"),
-                    nsfw=channel_data.get("nsfw", False),
-                    slowmode_delay=channel_data.get("slowmode_delay"),
-                    category=category,
-                    overwrites=overwrites,
-                    reason="Restauração de backup"
-                )
-                logging.info(f"Canal de texto '{channel_data['name']}' criado.")
-            elif channel_data["type"] == "voice_channel": 
-                await guild.create_voice_channel(
-                    name=channel_data["name"],
-                    position=channel_data["position"],
-                    bitrate=channel_data.get("bitrate"),
-                    user_limit=channel_data.get("user_limit"),
-                    category=category,
-                    overwrites=overwrites,
-                    reason="Restauração de backup"
-                )
-                logging.info(f"Canal de voz '{channel_data['name']}' criado.")
-            else:
-                logging.warning(f"Tipo de canal desconhecido ou não suportado para restauração: {channel_data['type']}")
-        except Exception as e:
-            logging.error(f"Não foi possível criar o canal '{channel_data['name']}' ({channel_data['type']}): {e}")
-
-    await interaction.followup.send("Restauração da estrutura do servidor concluída! Por favor, verifique manualmente.", ephemeral=True)
-    logging.info(f"Estrutura do servidor '{guild.name}' (ID: {guild.id}) restaurada por {interaction.user.name}.")
+def init_db():
+    print("Inicializando DB (placeholder)...")
+    # Sua lógica real de inicialização aqui
 
 
-# --- View para o Painel Principal de Backup/Restauração ---
-class BackupMainView(ui.View):
-    def __init__(self, bot: commands.Bot):
-        super().__init__(timeout=300) # Timeout de 5 minutos
+class MyBackupView(discord.ui.View):
+    def __init__(self, bot, guild_id, current_panel_data=None):
+        super().__init__(timeout=None)  # Timeout None para views persistentes
         self.bot = bot
-        self.message = None # Para armazenar a mensagem do painel
+        self.guild_id = guild_id
+        self.current_panel_data = current_panel_data if current_panel_data else {}
+        self.message = None  # <<--- NOVO: Atributo para guardar a mensagem do painel
 
-    async def on_timeout(self):
-        if self.message:
-            for item in self.children:
-                item.disabled = True
-            await self.message.edit(content="Sessão do painel de backup expirada.", view=self)
+        # Adicione seus botões. Seus rótulos e estilos podem ser diferentes.
+        self.add_item(discord.ui.Button(label="Criar Painel", custom_id="create_panel", style=discord.ButtonStyle.primary))
+        self.add_item(discord.ui.Button(label="Carregar Backup", custom_id="load_backup", style=discord.ButtonStyle.secondary))
+        self.add_item(discord.ui.Button(label="Gerenciar Backups", custom_id="manage_backups", style=discord.ButtonStyle.secondary))
+        self.add_item(discord.ui.Button(label="Enviar Painel", custom_id="send_panel", style=discord.ButtonStyle.success))
 
     async def _update_display(self, interaction: discord.Interaction):
-        """Atualiza a exibição do painel principal."""
+        # Lógica para construir o embed. Adapte com os dados reais do seu painel.
         embed = discord.Embed(
-            title="Painel de Backup e Restauração",
-            description="Use os botões abaixo para gerenciar a estrutura do seu servidor.",
+            title="Painel de Gerenciamento de Backup",
+            description="Use os botões abaixo para gerenciar os backups do servidor.",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Criar Backup", value="Salva a estrutura atual de cargos e canais em um arquivo JSON.", inline=False)
-        embed.add_field(name="Carregar Backup", value="Restaura a estrutura a partir de um arquivo JSON de backup que você anexar.", inline=False)
+        embed.add_field(name="Status do Painel:", value="Pronto para interação.", inline=False)
+        embed.set_footer(text="Última atualização: " + discord.utils.format_dt(discord.utils.utcnow(), "T"))
 
-        if self.message:
-            await self.message.edit(embed=embed, view=self)
-        else:
-            if interaction.response.is_done():
-                self.message = await interaction.followup.send(embed=embed, view=self, ephemeral=True)
+        try:
+            if self.message:
+                # Se a mensagem já existe, edite-a em vez de enviar uma nova
+                await self.message.edit(embed=embed, view=self)
             else:
-                await interaction.response.send_message(embed=embed, view=self, ephemeral=True)
-                self.message = await interaction.original_response()
+                # Se for a primeira vez, envie a mensagem e salve-a no self.message
+                self.message = await interaction.followup.send(embed=embed, view=self, ephemeral=True)
 
-    @ui.button(label="Criar Backup", style=discord.ButtonStyle.primary)
-    async def create_backup_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            filename = await _perform_backup_logic(interaction, interaction.guild)
-            # Envia o arquivo de backup diretamente para o usuário na resposta de acompanhamento
-            await interaction.followup.send(f"Backup criado com sucesso! Você pode baixar o arquivo aqui:", file=discord.File(filename), ephemeral=True)
-            # Opcional: Remover o arquivo local após o envio
-            os.remove(filename) 
-            logging.info(f"Arquivo de backup local {filename} removido após envio.")
+            # Para garantir que a interação foi respondida
+            if not interaction.response.is_done():
+                await interaction.response.defer() # Apenas deferir se ainda não foi respondido.
+
+        except HTTPException as e:
+            if e.status == 429:
+                print(f"RATE LIMITED ao atualizar painel de backup: Tentando novamente em {e.retry_after:.2f} segundos.")
+                if not interaction.response.is_done():
+                    # Tenta enviar uma resposta temporária se possível
+                    await interaction.followup.send("O Discord está me limitando. Por favor, aguarde e tente interagir novamente.", ephemeral=True)
+                await asyncio.sleep(e.retry_after + 1) # Espera um pouco mais do que o sugerido
+                # Opcional: tentar editar/enviar novamente após o sleep, ou desabilitar botões
+                # Para Views, geralmente o usuário terá que clicar de novo após o cooldown
+            else:
+                print(f"Erro inesperado ao atualizar painel de backup (HTTPException): {e}")
+                if not interaction.response.is_done():
+                    await interaction.followup.send("Ocorreu um erro desconhecido ao atualizar o painel.", ephemeral=True)
+                raise # Re-lança o erro se não for rate limit ou se não puder ser tratado
         except Exception as e:
-            logging.error(f"Erro ao criar backup pelo botão: {e}")
-            await interaction.followup.send(f"Ocorreu um erro ao criar o backup: {e}", ephemeral=True)
-        await self._update_display(interaction) # Atualiza a exibição do painel após a ação
-
-    @ui.button(label="Carregar Backup", style=discord.ButtonStyle.danger)
-    async def load_backup_button(self, interaction: discord.Interaction, button: ui.Button):
-        # Verifica se o usuário é o proprietário do bot antes de permitir a restauração
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("Você não tem permissão para carregar backups.", ephemeral=True)
-            return
-
-        await interaction.response.send_message("Por favor, anexe o arquivo JSON de backup que você deseja carregar. Eu irei processá-lo.", ephemeral=True)
-        
-        # Define uma função de checagem para o wait_for
-        def check(m: discord.Message):
-            return m.author == interaction.user and \
-                   m.channel == interaction.channel and \
-                   m.attachments and \
-                   m.attachments[0].filename.endswith(".json")
-
-        try:
-            # Espera por uma mensagem do usuário com um anexo JSON
-            message = await self.bot.wait_for('message', check=check, timeout=120.0) # Espera por 120 segundos
-            backup_file = message.attachments[0]
-            
-            await interaction.followup.send(f"Recebi o arquivo `{backup_file.filename}`. Iniciando restauração...", ephemeral=True)
-
-            backup_content = await backup_file.read()
-            backup_data = json.loads(backup_content.decode('utf-8'))
-
-            await _perform_restore_logic(interaction, backup_data)
-
-            # Deleta a mensagem do usuário com o arquivo de backup após o processamento
-            try:
-                await message.delete()
-            except discord.Forbidden:
-                logging.warning(f"Não tenho permissão para deletar a mensagem do usuário com o backup em {message.channel.name}.")
-            except discord.NotFound:
-                pass # Mensagem já deletada
-            
-        except asyncio.TimeoutError:
-            await interaction.followup.send("Tempo esgotado. Nenhum arquivo de backup foi recebido.", ephemeral=True)
-        except json.JSONDecodeError:
-            await interaction.followup.send("O arquivo anexado não é um JSON válido. Por favor, tente novamente com um arquivo JSON correto.", ephemeral=True)
-        except Exception as e:
-            logging.error(f"Erro ao carregar backup pelo botão: {e}")
-            await interaction.followup.send(f"Ocorreu um erro ao carregar o backup: {e}", ephemeral=True)
-        
-        await self._update_display(interaction) # Atualiza a exibição do painel após a ação
+            print(f"Erro geral ao atualizar painel de backup: {e}")
+            if not interaction.response.is_done():
+                await interaction.followup.send("Ocorreu um erro inesperado. Por favor, tente novamente.", ephemeral=True)
+            raise
 
 
-# --- Cog Principal de Comandos de Backup ---
 class BackupCommands(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
+        # Certifique-se de inicializar seu banco de dados ao carregar o cog
+        init_db()
 
-    @app_commands.command(name="backup_panel", description="Abre o painel de backup e restauração do servidor.")
-    @app_commands.checks.has_permissions(administrator=True)
+    # Comando de barra para iniciar o painel de backup
+    @app_commands.command(name="backup_panel", description="Cria/atualiza o painel de backup no canal atual.")
+    @app_commands.guild_only() # Garante que o comando só pode ser usado em guilds
+    # Cooldown para o comando: 1 uso a cada 10 segundos por servidor.
+    @app_commands.checks.cooldown(1, 10, key=lambda i: i.guild_id)
     async def backup_panel(self, interaction: discord.Interaction):
-        view = BackupMainView(self.bot)
+        # Defer a resposta da interação imediatamente para evitar o timeout de 3 segundos do Discord
         await interaction.response.defer(ephemeral=True)
-        await view._update_display(interaction)
 
-    @app_commands.command(name="backup", description="Cria um backup da estrutura de canais e cargos do servidor.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def backup_command(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            filename = await _perform_backup_logic(interaction, interaction.guild)
-            # Envia o arquivo de backup diretamente para o usuário na resposta de acompanhamento
-            await interaction.followup.send(f"Backup criado com sucesso! Você pode baixar o arquivo aqui:", file=discord.File(filename), ephemeral=True)
-            # Opcional: Remover o arquivo local após o envio
-            os.remove(filename) 
-            logging.info(f"Arquivo de backup local {filename} removido após envio.")
-        except Exception as e:
-            logging.error(f"Erro ao criar backup pelo comando /backup: {e}")
-            await interaction.followup.send(f"Ocorreu um erro ao criar o backup: {e}", ephemeral=True)
-
-    @app_commands.command(name="restore", description="Restaura a estrutura do servidor a partir de um arquivo JSON (APENAS COM EXTREMA CAUTELA!).")
-    @app_commands.check(commands.is_owner().predicate) # Mantém este comando restrito ao proprietário para segurança
-    @app_commands.describe(file="Anexe o arquivo JSON de backup aqui.")
-    async def restore_command(self, interaction: discord.Interaction, file: discord.Attachment):
-        if not file.filename.endswith(".json"):
-            await interaction.response.send_message("Por favor, anexe um arquivo JSON válido.", ephemeral=True)
-            return
+        # Cria uma nova instância da View
+        view = MyBackupView(self.bot, interaction.guild_id)
         
-        await interaction.response.defer(ephemeral=True)
+        # Chama _update_display para enviar/atualizar a mensagem do painel
+        await view._update_display(interaction)
+        
+        # Opcional: Confirmação para o usuário que o comando foi executado
+        # (se _update_display já enviou a mensagem inicial e você não precisa de outra)
+        # Se interaction.followup.send já foi usado em _update_display,
+        # você não deve usar interaction.followup.send aqui novamente
+        # a menos que queira uma segunda mensagem de confirmação separada.
 
-        try:
-            backup_content = await file.read()
-            backup_data = json.loads(backup_content.decode('utf-8'))
-            await _perform_restore_logic(interaction, backup_data)
-        except json.JSONDecodeError:
-            await interaction.followup.send("O arquivo JSON de backup é inválido.", ephemeral=True)
-        except Exception as e:
-            logging.error(f"Erro geral ao carregar backup pelo comando /restore: {e}")
-            await interaction.followup.send(f"Ocorreu um erro ao carregar o backup: {e}", ephemeral=True)
+    @backup_panel.error # Handler para erros específicos do comando backup_panel
+    async def backup_panel_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CommandOnCooldown):
+            remaining_time = int(error.retry_after)
+            await interaction.response.send_message(
+                f"Este comando está em cooldown! Por favor, aguarde **{remaining_time}** segundos para usá-lo novamente.",
+                ephemeral=True
+            )
+        elif isinstance(error, HTTPException):
+            await interaction.response.send_message(
+                "Ocorreu um erro de comunicação com o Discord (Rate Limit ou outro problema HTTP). Por favor, tente novamente.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Ocorreu um erro inesperado ao executar o comando backup_panel: `{error}`",
+                ephemeral=True
+            )
+            print(f"Erro inesperado no comando backup_panel: {error}") # Log para depuração
 
-
-async def setup(bot: commands.Bot):
+# Função de setup para o cog
+async def setup(bot):
     await bot.add_cog(BackupCommands(bot))

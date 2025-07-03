@@ -1,475 +1,198 @@
+# cogs/moderation/lockdown_panel.py
 import discord
 from discord.ext import commands
-from discord import app_commands, ui
 import logging
+from discord.ui import Button, View
+from discord import ButtonStyle, app_commands
+from database import execute_query # Certifique-se de que database.py está no caminho correto
+import json # Para lidar com embeds em formato JSON
 
-from database import execute_query
-from cogs.moderation.lockdown_core import LockdownCore # Importa o cog principal de lockdown
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Certifique-se de que o LockdownCore está carregado ANTES deste cog
+# A lógica de lockdown real (aplicar/remover permissões) deve estar no LockdownCore
 
-class LockdownPanelView(ui.View):
-    """View persistente para o painel de controle de lockdown."""
-    def __init__(self, bot: commands.Bot, guild_id: int):
-        super().__init__(timeout=None)
+class LockdownPanelButtons(View):
+    def __init__(self, bot):
+        super().__init__(timeout=None) # Timeout=None para view persistente
         self.bot = bot
-        self.guild_id = guild_id
-        self.message = None # Para armazenar a referência à mensagem do painel
 
-    async def get_lockdown_core_cog(self) -> LockdownCore:
-        """Obtém a instância do LockdownCore cog."""
-        cog = self.bot.get_cog("LockdownCore")
-        if cog is None:
-            logging.error("LockdownCore cog não encontrado. O painel de lockdown pode não funcionar corretamente.")
-        return cog
-
-    async def refresh_panel(self, guild_id: int, bot_client: commands.Bot):
-        """Atualiza a mensagem do painel de lockdown com o estado atual do canal."""
-        logging.info(f"[refresh_panel_lockdown] Iniciando refresh do painel para guild_id: {guild_id}")
-        
-        panel_data = execute_query(
-            "SELECT channel_id, message_id FROM lockdown_panel_settings WHERE guild_id = ?",
-            (guild_id,),
-            fetchone=True
-        )
-
-        if not panel_data or panel_data[0] is None or panel_data[1] is None:
-            logging.warning(f"[refresh_panel_lockdown] Nenhum dado de canal/mensagem válido encontrado no DB para o painel de lockdown da guild {guild_id}. Não foi possível atualizar o painel.")
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
+    @discord.ui.button(label="Ativar Lockdown", style=ButtonStyle.red, custom_id="lockdown_panel:activate")
+    async def activate_lockdown(self, interaction: discord.Interaction, button: Button):
+        # A lógica de lockdown está no LockdownCore
+        lockdown_cog = self.bot.get_cog("LockdownCore")
+        if not lockdown_cog:
+            await interaction.response.send_message("❌ Erro interno: O módulo de lockdown não está carregado corretamente.", ephemeral=True)
+            logger.error("LockdownCore cog não encontrado ao tentar ativar lockdown do painel.")
             return
 
-        panel_channel_id, panel_message_id = panel_data
-        
-        guild = bot_client.get_guild(guild_id)
-        if not guild:
-            logging.warning(f"[refresh_panel_lockdown] Guild {guild_id} não encontrada durante refresh. Removendo painel do DB.")
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
+        # Verifica permissões do usuário que clicou
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("🚫 Você não tem permissão para ativar o lockdown (requer 'Gerenciar Canais').", ephemeral=True)
             return
 
-        panel_channel = None
-        try:
-            panel_channel = await guild.fetch_channel(panel_channel_id)
-            if not isinstance(panel_channel, discord.TextChannel):
-                logging.warning(f"[refresh_panel_lockdown] Canal do painel {panel_channel_id} não é um canal de texto. Removendo do DB.")
-                execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
+        # Busca o canal atual do painel de lockdown para ver se ele já está bloqueado
+        panel_settings = execute_query("SELECT channel_id FROM lockdown_panel_settings WHERE guild_id = ?", 
+                                       (interaction.guild_id,), fetchone=True)
+        
+        if panel_settings and panel_settings[0] == interaction.channel_id:
+            # Se o botão está no canal do painel, verificar se o *canal do painel* já está em lockdown
+            is_locked = execute_query("SELECT channel_id FROM locked_channels WHERE channel_id = ?", 
+                                      (interaction.channel_id,), fetchone=True)
+            if is_locked:
+                await interaction.response.send_message("⚠️ Este canal já está em lockdown.", ephemeral=True)
                 return
-        except discord.NotFound:
-            logging.error(f"[refresh_panel_lockdown] Canal do painel {panel_channel_id} NÃO ENCONTRADO durante refresh. Removendo do DB.")
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-            return
-        except discord.Forbidden:
-            logging.error(f"[refresh_panel_lockdown] Bot sem permissão para buscar canal do painel {panel_channel_id} durante refresh. Verifique as permissões 'Ver Canais'.")
-            return
-        except Exception as e:
-            logging.error(f"[refresh_panel_lockdown] Erro inesperado ao buscar canal do painel {panel_channel_id} durante refresh: {e}", exc_info=True)
-            return
-
-        message = None
-        try:
-            message = await panel_channel.fetch_message(panel_message_id)
-            self.message = message
-            logging.info(f"[refresh_panel_lockdown] Mensagem do painel {panel_message_id} encontrada.")
-        except discord.NotFound:
-            logging.error(f"[refresh_panel_lockdown] Mensagem do painel {panel_message_id} NÃO ENCONTRADA no canal {panel_channel_id}. Removendo do DB.")
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-            if panel_channel:
-                try: await panel_channel.send(f"⚠️ O painel de lockdown foi perdido! Por favor, use `/lockdown_panel setup` para configurá-lo novamente.", delete_after=30)
-                except: pass
-            return
-        except discord.Forbidden:
-            logging.error(f"[refresh_panel_lockdown] Bot sem permissão para ler histórico de mensagens no canal {panel_channel_id}. Não é possível atualizar o painel.")
-            return
-        except Exception as e:
-            logging.error(f"[refresh_panel_lockdown] Erro inesperado ao buscar mensagem {panel_message_id}: {e}", exc_info=True)
-            return
-
-        # Obter o status de lockdown do canal principal (geralmente o canal do painel ou um canal padrão)
-        lockdown_core = await self.get_lockdown_core_cog()
-        is_panel_channel_locked = False
-        if lockdown_core:
-            is_panel_channel_locked = await lockdown_core._is_channel_locked(panel_channel_id)
-        else:
-            logging.warning("LockdownCore cog não encontrado ao tentar verificar o estado do canal no refresh do painel.")
-        
-        status = "Ativado (Canais Bloqueados)" if is_panel_channel_locked else "Desativado (Canais Desbloqueados)"
-        color = discord.Color.red() if is_panel_channel_locked else discord.Color.green()
-
-        embed = discord.Embed(
-            title="Painel de Controle de Lockdown",
-            description=f"Status: **{status}**\n\nUse os botões para controlar o acesso aos canais.",
-            color=color
-        )
-        embed.add_field(name="Canais Afetados (Padrão)", value=f"O canal atual ({panel_channel.mention})", inline=False)
-        embed.set_footer(text="Ao ativar, o canal do painel será bloqueado. Para bloquear todos, use o comando /lockdown_all_channels.")
-
-        self.clear_items()
-
-        # Botões do painel: 'Bloquear Canal', 'Desbloquear Canal'
-        # Adiciona o botão correto baseado no estado atual do canal
-        if is_panel_channel_locked:
-            self.add_item(ui.Button(label="Desbloquear Canal", style=discord.ButtonStyle.success, custom_id="lockdown_panel_unlock_channel"))
-        else:
-            self.add_item(ui.Button(label="Bloquear Canal", style=discord.ButtonStyle.danger, custom_id="lockdown_panel_lock_channel"))
-        
-        # Botões para "Todos os Canais"
-        self.add_item(ui.Button(label="Bloquear TODOS os Canais", style=discord.ButtonStyle.danger, custom_id="lockdown_panel_lock_all"))
-        self.add_item(ui.Button(label="Desbloquear TODOS os Canais", style=discord.ButtonStyle.success, custom_id="lockdown_panel_unlock_all"))
-
-        # Re-adicionar a view persistente à mensagem
-        # Criar uma nova instância da view para garantir que os callbacks funcionem corretamente
-        new_view_instance = LockdownPanelView(bot_client, guild_id)
-        new_view_instance.message = message # Garante que a nova view tenha referência à mensagem
-
-        try:
-            logging.info(f"[refresh_panel_lockdown] Tentando editar mensagem {message.id} com novo embed e nova view...")
-            await message.edit(embed=embed, view=new_view_instance)
-            # Adicione a nova instância da view ao bot para torná-la persistente
-            bot_client.add_view(new_view_instance, message_id=message.id)
-            logging.info(f"[refresh_panel_lockdown] Painel de Lockdown atualizado com sucesso com NOVA VIEW para guild {guild_id}.")
-        except discord.Forbidden:
-            logging.error(f"[refresh_panel_lockdown] Bot sem permissão para editar a mensagem do painel {message.id} no canal {panel_channel_id}. Verifique as permissões 'Gerenciar Mensagens'.")
-        except Exception as e:
-            logging.error(f"[refresh_panel_lockdown] Erro inesperado ao editar a mensagem do painel {message.id} na guild {guild_id} durante refresh: {e}", exc_info=True)
-
-
-    @ui.button(label="Bloquear Canal", style=discord.ButtonStyle.danger, custom_id="lockdown_panel_lock_channel")
-    async def lock_channel_button_callback(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        logging.info(f"[lock_channel_button_callback] Iniciando para guild {self.guild_id}, canal {interaction.channel.id} por {interaction.user.id}")
-
-        lockdown_core = await self.get_lockdown_core_cog()
-        if not lockdown_core:
-            await interaction.followup.send("Erro: O sistema de lockdown principal não está carregado. Por favor, contate um administrador.", ephemeral=True)
-            return
-
-        success, status_message = await lockdown_core._toggle_lockdown(
-            channel=interaction.channel,
-            lock=True,
-            reason=f"Ativado via Painel de Lockdown por {interaction.user.name}",
-            locked_by=interaction.user
-        )
-
-        if success:
-            await interaction.followup.send(f"O canal {interaction.channel.mention} foi bloqueado com sucesso.", ephemeral=True)
-            await lockdown_core._send_lockdown_message(interaction.channel, True, f"Ativado via Painel de Lockdown por {interaction.user.name}")
-            await self.refresh_panel(self.guild_id, interaction.client)
-        else:
-            await interaction.followup.send(status_message, ephemeral=True)
-
-    @ui.button(label="Desbloquear Canal", style=discord.ButtonStyle.success, custom_id="lockdown_panel_unlock_channel")
-    async def unlock_channel_button_callback(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        logging.info(f"[unlock_channel_button_callback] Iniciando para guild {self.guild_id}, canal {interaction.channel.id} por {interaction.user.id}")
-
-        lockdown_core = await self.get_lockdown_core_cog()
-        if not lockdown_core:
-            await interaction.followup.send("Erro: O sistema de lockdown principal não está carregado. Por favor, contate um administrador.", ephemeral=True)
-            return
-        
-        is_locked = await lockdown_core._is_channel_locked(interaction.channel.id)
-        if not is_locked:
-            await interaction.followup.send(f"O canal {interaction.channel.mention} não está atualmente em lockdown pelo sistema (ou não está registrado no DB).", ephemeral=True)
-            await self.refresh_panel(self.guild_id, interaction.client)
-            return
-
-        success, status_message = await lockdown_core._toggle_lockdown(
-            channel=interaction.channel,
-            lock=False,
-            reason=f"Desativado via Painel de Lockdown por {interaction.user.name}"
-        )
-
-        if success:
-            await interaction.followup.send(f"O canal {interaction.channel.mention} foi desbloqueado com sucesso.", ephemeral=True)
-            await lockdown_core._send_lockdown_message(interaction.channel, False, f"Desativado via Painel de Lockdown por {interaction.user.name}")
-            await self.refresh_panel(self.guild_id, interaction.client)
-        else:
-            await interaction.followup.send(status_message, ephemeral=True)
-
-    @ui.button(label="Bloquear TODOS os Canais", style=discord.ButtonStyle.danger, custom_id="lockdown_panel_lock_all")
-    async def lock_all_channels_button_callback(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        logging.info(f"[lock_all_channels_button_callback] Iniciando para guild {self.guild_id} por {interaction.user.id}")
-
-        if not interaction.guild:
-            await interaction.followup.send("Este comando só pode ser usado em um servidor.", ephemeral=True)
-            return
-
-        lockdown_core = await self.get_lockdown_core_cog()
-        if not lockdown_core:
-            await interaction.followup.send("Erro: O sistema de lockdown principal não está carregado. Por favor, contate um administrador.", ephemeral=True)
-            return
-
-        locked_count = 0
-        skipped_channels = [] # Nova lista para canais explicitamente pulados (já marcados no DB)
-        failed_channels = [] # Lista para canais que falharam por erro ou permissão
-        
-        for channel in interaction.guild.text_channels:
-            try:
-                # Otimização: A permissão 'manage_channels' já é verificada dentro de _toggle_lockdown,
-                # mas mantê-la aqui pode dar um feedback mais cedo.
-                # A permissão principal para modificar overwrites é 'manage_roles'.
-                # Vamos deixar a verificação principal no _toggle_lockdown para consistência.
-
-                # Verifica se o canal já está marcado como bloqueado no DB
-                is_locked_in_db = await lockdown_core._is_channel_locked(channel.id)
-                if is_locked_in_db:
-                    logging.info(f"Canal #{channel.name} ({channel.id}) já está marcado como bloqueado no DB, pulando.")
-                    skipped_channels.append(channel.name)
-                    continue
-
-                # Tenta alternar o lockdown
-                success, msg = await lockdown_core._toggle_lockdown(
-                    channel=channel,
-                    lock=True,
-                    reason=f"Lockdown geral ativado via Painel por {interaction.user.name}",
-                    locked_by=interaction.user
-                )
-                if success:
-                    locked_count += 1
-                    await lockdown_core._send_lockdown_message(channel, True, f"Lockdown geral ativado por {interaction.user.name}")
-                else:
-                    # Se success for False, msg contém a razão do _toggle_lockdown
-                    failed_channels.append(f"{channel.name} ({msg})")
-            except Exception as e:
-                logging.error(f"Erro inesperado ao tentar bloquear canal {channel.name} ({channel.id}): {e}", exc_info=True)
-                failed_channels.append(f"{channel.name} (Erro interno: {e})")
-
-        response_message = f"Foram bloqueados {locked_count} canais de texto."
-        if skipped_channels:
-            response_message += f"\n\n**Canal(is) já marcado(s) como bloqueado(s) no sistema (pulado(s)):**\n{', '.join(skipped_channels)}"
-        if failed_channels:
-            response_message += f"\n\n**Falha ao bloquear:**\n{'; '.join(failed_channels)}\n\nPor favor, verifique as permissões do bot ('Gerenciar Cargos' e 'Gerenciar Canais') e a hierarquia de cargos."
-        
-        await interaction.followup.send(response_message, ephemeral=True)
-        await self.refresh_panel(self.guild_id, interaction.client)
-
-    @ui.button(label="Desbloquear TODOS os Canais", style=discord.ButtonStyle.success, custom_id="lockdown_panel_unlock_all")
-    async def unlock_all_channels_button_callback(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        logging.info(f"[unlock_all_channels_button_callback] Iniciando para guild {self.guild_id} por {interaction.user.id}")
-
-        if not interaction.guild:
-            await interaction.followup.send("Este comando só pode ser usado em um servidor.", ephemeral=True)
-            return
-
-        lockdown_core = await self.get_lockdown_core_cog()
-        if not lockdown_core:
-            await interaction.followup.send("Erro: O sistema de lockdown principal não está carregado. Por favor, contate um administrador.", ephemeral=True)
-            return
-
-        unlocked_count = 0
-        failed_channels = []
-
-        # Buscar todos os canais que estão em lockdown pelo nosso DB
-        locked_channels_data = execute_query(
-            "SELECT channel_id FROM locked_channels WHERE guild_id = ?",
-            (interaction.guild.id,),
-            fetchall=True
-        )
-        locked_channel_ids = [row[0] for row in locked_channels_data]
-
-        for channel_id in locked_channel_ids:
-            channel = interaction.guild.get_channel(channel_id)
-            if not channel or not isinstance(channel, discord.TextChannel):
-                logging.warning(f"Canal {channel_id} do DB não encontrado ou não é de texto. Removendo do DB.")
-                execute_query("DELETE FROM locked_channels WHERE channel_id = ?", (channel_id,), commit=True)
-                continue
 
             try:
-                # A permissão 'manage_channels' já é verificada dentro de _toggle_lockdown.
-                # A permissão principal para modificar overwrites é 'manage_roles'.
-
-                success, msg = await lockdown_core._toggle_lockdown(
-                    channel=channel,
-                    lock=False,
-                    reason=f"Lockdown geral desativado via Painel por {interaction.user.name}"
-                )
-                if success:
-                    unlocked_count += 1
-                    await lockdown_core._send_lockdown_message(channel, False, f"Lockdown geral desativado por {interaction.user.name}")
-                else:
-                    failed_channels.append(f"{channel.name} ({msg})")
+                # Usar a função de lockdown do LockdownCore para o canal atual
+                await interaction.response.defer(ephemeral=True) # Defer para evitar "Interaction failed"
+                await lockdown_cog._update_channel_permissions(interaction.channel, True)
+                await lockdown_cog._add_locked_channel_to_db(interaction.channel.id, interaction.guild_id, None, "Ativado via painel de lockdown", interaction.user.id)
+                await interaction.followup.send(f"🔒 Este canal ({interaction.channel.mention}) foi colocado em lockdown!", ephemeral=False)
+                logger.info(f"Canal {interaction.channel.id} bloqueado via painel por {interaction.user.id}.")
             except Exception as e:
-                logging.error(f"Erro ao tentar desbloquear canal {channel.name} ({channel.id}): {e}", exc_info=True)
-                failed_channels.append(f"{channel.name} (Erro interno: {e})")
+                await interaction.followup.send(f"❌ Ocorreu um erro ao tentar ativar o lockdown: {e}", ephemeral=True)
+                logger.error(f"Erro ao ativar lockdown via painel para canal {interaction.channel.id}: {e}", exc_info=True)
+        else:
+             await interaction.response.send_message("❌ Este painel de lockdown não está configurado para este canal.", ephemeral=True)
 
-        response_message = f"Foram desbloqueados {unlocked_count} canais de texto."
-        if failed_channels:
-            response_message += f"\n\n**Falha ao desbloquear:**\n{'; '.join(failed_channels)}\n\nPor favor, verifique as permissões do bot ('Gerenciar Cargos' e 'Gerenciar Canais') e a hierarquia de cargos."
+
+    @discord.ui.button(label="Desativar Lockdown", style=ButtonStyle.green, custom_id="lockdown_panel:deactivate")
+    async def deactivate_lockdown(self, interaction: discord.Interaction, button: Button):
+        lockdown_cog = self.bot.get_cog("LockdownCore")
+        if not lockdown_cog:
+            await interaction.response.send_message("❌ Erro interno: O módulo de lockdown não está carregado corretamente.", ephemeral=True)
+            logger.error("LockdownCore cog não encontrado ao tentar desativar lockdown do painel.")
+            return
         
-        await interaction.followup.send(response_message, ephemeral=True)
-        await self.refresh_panel(self.guild_id, interaction.client)
+        # Verifica permissões do usuário que clicou
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("🚫 Você não tem permissão para desativar o lockdown (requer 'Gerenciar Canais').", ephemeral=True)
+            return
+
+        # Busca o canal atual do painel de lockdown para ver se ele está bloqueado
+        panel_settings = execute_query("SELECT channel_id FROM lockdown_panel_settings WHERE guild_id = ?", 
+                                       (interaction.guild_id,), fetchone=True)
+        
+        if panel_settings and panel_settings[0] == interaction.channel_id:
+            # Se o botão está no canal do painel, verificar se o *canal do painel* está em lockdown
+            is_locked = execute_query("SELECT channel_id FROM locked_channels WHERE channel_id = ?", 
+                                      (interaction.channel_id,), fetchone=True)
+            if not is_locked:
+                await interaction.response.send_message("⚠️ Este canal não está em lockdown.", ephemeral=True)
+                return
+
+            try:
+                # Usar a função de unlock do LockdownCore para o canal atual
+                await interaction.response.defer(ephemeral=True)
+                await lockdown_cog._update_channel_permissions(interaction.channel, False)
+                await lockdown_cog._remove_locked_channel_from_db(interaction.channel.id)
+                # Cancelar tarefa agendada se existir
+                if interaction.channel.id in lockdown_cog.lockdown_tasks:
+                    lockdown_cog.lockdown_tasks[interaction.channel.id].cancel()
+                    del lockdown_cog.lockdown_tasks[interaction.channel.id]
+
+                await interaction.followup.send(f"🔓 Este canal ({interaction.channel.mention}) foi desbloqueado!", ephemeral=False)
+                logger.info(f"Canal {interaction.channel.id} desbloqueado via painel por {interaction.user.id}.")
+            except Exception as e:
+                await interaction.followup.send(f"❌ Ocorreu um erro ao tentar desativar o lockdown: {e}", ephemeral=True)
+                logger.error(f"Erro ao desativar lockdown via painel para canal {interaction.channel.id}: {e}", exc_info=True)
+        else:
+            await interaction.response.send_message("❌ Este painel de lockdown não está configurado para este canal.", ephemeral=True)
 
 
 class LockdownPanel(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
-        self.bot.loop.create_task(self.ensure_persistent_panel_view())
+        logger.info("Cog de Painel de Lockdown inicializada.")
+        self.bot.add_view(LockdownPanelButtons(self.bot)) # Adiciona a view persistente ao iniciar
 
-    async def ensure_persistent_panel_view(self):
-        await self.bot.wait_until_ready()
-        logging.info("Tentando carregar painéis de Lockdown persistentes...")
-        panel_datas = execute_query("SELECT guild_id, channel_id, message_id FROM lockdown_panel_settings", fetchall=True)
-        logging.info(f"[ensure_persistent_panel_view] Dados lidos do DB: {panel_datas}") 
-        
-        if panel_datas:
-            for guild_id, channel_id, message_id in panel_datas:
-                if channel_id is None or message_id is None:
-                    logging.warning(f"[ensure_persistent_panel_view] Pulando entrada inválida no DB para guild {guild_id} (channel_id ou message_id é None). Removendo do DB.")
-                    execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-                    continue
-                
-                try:
-                    guild = self.bot.get_guild(guild_id)
-                    if not guild:
-                        logging.warning(f"Guild {guild_id} não encontrada para painel persistente de lockdown. Removendo do DB.")
-                        execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-                        continue
-                    
-                    channel = await guild.fetch_channel(channel_id)
-                    if not isinstance(channel, discord.TextChannel):
-                        logging.warning(f"Canal {channel_id} não é de texto para painel persistente de lockdown na guild {guild_id}. Removendo do DB.")
-                        execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-                        continue
+    @commands.hybrid_group(name="lockdown_panel", description="Comandos para gerenciar o painel de lockdown.")
+    @commands.has_permissions(manage_guild=True)
+    async def lockdown_panel_group(self, ctx: commands.Context):
+        """Comandos para gerenciar o painel de lockdown."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send("Comando inválido para o painel de lockdown. Use `setup` ou `remove`.")
 
-                    message = await channel.fetch_message(message_id)
-                    view = LockdownPanelView(self.bot, guild_id)
-                    view.message = message 
-                    self.bot.add_view(view, message_id=message.id)
-                    logging.info(f"Painel de Lockdown persistente carregado para guild {guild_id} no canal {channel_id}, mensagem {message_id}.")
-                except discord.NotFound:
-                    logging.warning(f"Mensagem do painel de Lockdown ({message_id}) ou canal ({channel_id}) não encontrada. Removendo do DB para evitar carregamentos futuros.")
-                    execute_query("DELETE FROM lockdown_panel_settings WHERE message_id = ?", (message_id,))
-                except discord.Forbidden:
-                    logging.error(f"Bot sem permissão para acessar o canal {channel_id} ou mensagem {message_id} na guild {guild_id}. Não foi possível carregar o painel persistente de lockdown.")
-                except Exception as e:
-                    logging.error(f"Erro inesperado ao carregar painel persistente de lockdown para guild {guild_id}, mensagem {message_id}: {e}", exc_info=True)
-        else:
-            logging.info("Nenhum painel de Lockdown persistente para carregar.")
-
-    @app_commands.command(name="lockdown_panel_setup", description="Configura ou move o painel de controle de lockdown para o canal atual.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def setup_lockdown_panel(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        guild_id = interaction.guild.id
-        
-        old_panel_data = execute_query(
-            "SELECT channel_id, message_id FROM lockdown_panel_settings WHERE guild_id = ?",
-            (guild_id,),
-            fetchone=True
-        )
-        if old_panel_data and (old_panel_data[0] is not None and old_panel_data[1] is not None): 
-            old_channel_id, old_message_id = old_panel_data
-            try:
-                old_channel = await interaction.guild.fetch_channel(old_channel_id)
-                if isinstance(old_channel, discord.TextChannel):
-                    old_message = await old_channel.fetch_message(old_message_id)
-                    await old_message.delete()
-                    logging.info(f"[setup_lockdown_panel] Mensagem do painel de lockdown antigo ({old_message_id}) deletada do canal {old_channel_id}.")
-            except discord.NotFound:
-                logging.warning(f"[setup_lockdown_panel] Mensagem do painel de lockdown ({old_message_id}) não encontrada para deletar no canal {old_channel_id}.")
-            except discord.Forbidden:
-                logging.error(f"[setup_lockdown_panel] Bot sem permissão para deletar a mensagem do painel antigo ({old_message_id}) no canal {old_channel_id}. Verifique as permissões 'Gerenciar Mensagens'.")
-            except Exception as e:
-                logging.error(f"[setup_lockdown_panel] Erro ao deletar painel de lockdown antigo: {e}", exc_info=True)
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,)) 
-        elif old_panel_data: 
-            logging.warning(f"[setup_lockdown_panel] Entrada antiga de painel com IDs None para guild {guild_id}. Deletando do DB.")
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-
-        # O estado inicial do painel vai depender do estado do canal atual
-        lockdown_core = self.bot.get_cog("LockdownCore")
-        is_panel_channel_locked = False
-        if lockdown_core:
-            is_panel_channel_locked = await lockdown_core._is_channel_locked(interaction.channel.id)
-        else:
-            logging.warning("LockdownCore cog não encontrado ao tentar verificar o estado do canal no setup do painel.")
-
-        status = "Ativado (Canais Bloqueados)" if is_panel_channel_locked else "Desativado (Canais Desbloqueados)"
-        color = discord.Color.red() if is_panel_channel_locked else discord.Color.green()
+    @lockdown_panel_group.command(name="setup", description="Configura o painel de lockdown em um canal.")
+    @app_commands.describe(
+        channel="O canal onde o painel de lockdown será enviado."
+    )
+    async def setup_panel(self, ctx: commands.Context, channel: discord.TextChannel):
+        if not ctx.guild:
+            return await ctx.send("Este comando só pode ser usado em um servidor.")
 
         embed = discord.Embed(
-            title="Painel de Controle de Lockdown",
-            description=f"Status: **{status}**\n\nUse os botões para controlar o acesso aos canais.",
-            color=color
+            title="Painel de Lockdown",
+            description="Clique nos botões abaixo para ativar ou desativar o lockdown neste canal.",
+            color=discord.Color.red()
         )
-        embed.add_field(name="Canais Afetados (Padrão)", value=f"O canal atual ({interaction.channel.mention})", inline=False)
-        embed.set_footer(text="Ao ativar, o canal do painel será bloqueado. Para bloquear todos, use o comando /lockdown_all_channels.")
+        embed.set_footer(text="Apenas membros com permissão de 'Gerenciar Canais' podem usar.")
 
-
-        view = LockdownPanelView(self.bot, guild_id)
-        
+        # Tenta enviar a mensagem e guardar o ID
         try:
-            panel_message = await interaction.channel.send(embed=embed, view=view)
-            view.message = panel_message 
-
-            logging.info(f"[setup_lockdown_panel] Tentando salvar no DB: guild_id={guild_id}, channel_id={interaction.channel.id}, message_id={panel_message.id}")
-
-            success_db_insert = execute_query(
+            message = await channel.send(embed=embed, view=LockdownPanelButtons(self.bot))
+            
+            # Salva no banco de dados
+            execute_query(
                 "INSERT OR REPLACE INTO lockdown_panel_settings (guild_id, channel_id, message_id) VALUES (?, ?, ?)",
-                (guild_id, interaction.channel.id, panel_message.id)
+                (ctx.guild.id, channel.id, message.id)
             )
-            if success_db_insert:
-                logging.info(f"[setup_lockdown_panel] Dados do painel de lockdown salvos com sucesso no DB para guild {guild_id}.")
-            else:
-                logging.error(f"[setup_lockdown_panel] Falha ao salvar dados do painel de lockdown no DB para guild {guild_id}.")
-
-            self.bot.add_view(view, message_id=panel_message.id) 
-            await interaction.followup.send(f"Painel de controle de lockdown configurado neste canal: {interaction.channel.mention}", ephemeral=True)
-            logging.info(f"Painel de Lockdown configurado/movido por {interaction.user.id} para canal {interaction.channel.id} na guild {guild_id}. Mensagem ID: {panel_message.id}.")
+            await ctx.send(f"✅ Painel de lockdown configurado em {channel.mention}.", ephemeral=True)
+            logger.info(f"Painel de lockdown configurado no guild {ctx.guild.id} no canal {channel.id} (message_id: {message.id}).")
         except discord.Forbidden:
-            await interaction.followup.send("Não tenho permissão para enviar mensagens neste canal. Por favor, verifique as minhas permissões.", ephemeral=True)
-            logging.error(f"Bot sem permissão para enviar painel de lockdown no canal {interaction.channel.id} na guild {guild_id}.")
+            await ctx.send(f"🚫 Não tenho permissão para enviar mensagens no canal {channel.mention}. Verifique minhas permissões.", ephemeral=True)
+            logger.error(f"Erro de permissão ao configurar painel de lockdown no guild {ctx.guild.id} canal {channel.id}.")
         except Exception as e:
-            await interaction.followup.send(f"Ocorreu um erro ao configurar o painel: {e}", ephemeral=True)
-            logging.error(f"Erro inesperado ao configurar painel de lockdown na guild {guild_id}: {e}", exc_info=True)
+            await ctx.send(f"❌ Ocorreu um erro ao configurar o painel de lockdown: {e}", ephemeral=True)
+            logger.error(f"Erro ao configurar painel de lockdown no guild {ctx.guild.id}: {e}", exc_info=True)
 
-    @app_commands.command(name="lockdown_panel_delete", description="Deleta o painel de controle de lockdown existente.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def delete_lockdown_panel(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        guild_id = interaction.guild.id
-        panel_data = execute_query(
-            "SELECT channel_id, message_id FROM lockdown_panel_settings WHERE guild_id = ?",
-            (guild_id,),
-            fetchone=True
-        )
 
-        if not panel_data:
-            await interaction.followup.send("Nenhum painel de controle de lockdown encontrado para deletar.", ephemeral=True)
-            logging.info(f"Tentativa de deletar painel de lockdown, mas nenhum painel encontrado para guild {guild_id}.")
-            return
+    @lockdown_panel_group.command(name="remove", description="Remove o painel de lockdown configurado.")
+    async def remove_panel(self, ctx: commands.Context):
+        if not ctx.guild:
+            return await ctx.send("Este comando só pode ser usado em um servidor.")
 
-        channel_id, message_id = panel_data
-        
-        if channel_id is None or message_id is None:
-            logging.warning(f"Entrada inválida no DB para guild {guild_id} (channel_id ou message_id é None). Apenas deletando do DB.")
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-            await interaction.followup.send("Painel de controle de lockdown deletado com sucesso (entrada inválida no DB).", ephemeral=True)
-            return
+        settings = execute_query("SELECT channel_id, message_id FROM lockdown_panel_settings WHERE guild_id = ?", 
+                                 (ctx.guild.id,), fetchone=True)
 
-        try:
-            channel = await interaction.guild.fetch_channel(channel_id)
-            if isinstance(channel, discord.TextChannel):
+        if not settings:
+            return await ctx.send("⚠️ Nenhum painel de lockdown configurado para este servidor.", ephemeral=True)
+
+        channel_id, message_id = settings
+        channel = self.bot.get_channel(channel_id)
+
+        if channel:
+            try:
                 message = await channel.fetch_message(message_id)
                 await message.delete()
-                logging.info(f"Mensagem do painel de Lockdown ({message_id}) deletada com sucesso do canal {channel_id}.")
-            else:
-                logging.warning(f"Canal {channel_id} não é de texto para painel de Lockdown. Removendo do DB sem tentar deletar mensagem.")
-        except discord.NotFound:
-            logging.warning(f"Mensagem do painel de Lockdown ({message_id}) não encontrada para deletar no canal {channel_id}.")
-        except discord.Forbidden:
-            logging.error(f"Bot sem permissão para deletar a mensagem do painel ({message_id}) no canal {channel_id}. Verifique as permissões 'Gerenciar Mensagens'.")
-            await interaction.followup.send("Não tenho permissão para deletar a mensagem do painel. Por favor, verifique as minhas permissões 'Gerenciar Mensagens'.", ephemeral=True)
-            return
-        except Exception as e:
-            logging.error(f"Erro inesperado ao deletar a mensagem do painel de lockdown: {e}", exc_info=True)
-            await interaction.followup.send(f"Ocorreu um erro inesperado ao deletar o painel: {e}", ephemeral=True)
-            return
-        finally:
-            execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (guild_id,))
-            await interaction.followup.send("Painel de controle de lockdown deletado com sucesso.", ephemeral=True)
-            logging.info(f"Painel de Lockdown deletado por {interaction.user.id} na guild {guild_id}.")
+                await ctx.send(f"✅ Painel de lockdown removido de {channel.mention}.", ephemeral=True)
+            except discord.NotFound:
+                await ctx.send("⚠️ Mensagem do painel de lockdown não encontrada. Removendo apenas do banco de dados.", ephemeral=True)
+            except discord.Forbidden:
+                await ctx.send(f"🚫 Não tenho permissão para apagar mensagens no canal {channel.mention}. Removendo apenas do banco de dados.", ephemeral=True)
+                logger.warning(f"Não foi possível apagar mensagem do painel de lockdown em {channel.id} para guild {ctx.guild.id}. Permissões insuficientes.")
+            except Exception as e:
+                await ctx.send(f"❌ Ocorreu um erro ao tentar apagar a mensagem: {e}", ephemeral=True)
+                logger.error(f"Erro ao apagar mensagem do painel de lockdown: {e}", exc_info=True)
+        
+        execute_query("DELETE FROM lockdown_panel_settings WHERE guild_id = ?", (ctx.guild.id,))
+        logger.info(f"Painel de lockdown removido do DB para guild {ctx.guild.id}.")
+        
+        if not channel: # Se o canal não foi encontrado, mas a entrada existia no DB
+            await ctx.send("✅ Configuração do painel de lockdown removida do banco de dados (o canal original pode não existir mais).", ephemeral=True)
 
-async def setup(bot: commands.Bot):
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Garante que as views persistentes são adicionadas ao bot
+        # Isso é importante para que os botões do painel funcionem após um reinício
+        self.bot.add_view(LockdownPanelButtons(self.bot))
+        logger.info("Views persistentes de Painel de Lockdown garantidas.")
+
+
+# Esta função é CRUCIAL para o bot carregar o cog.
+async def setup(bot):
+    """Adiciona o cog de Painel de Lockdown ao bot."""
     await bot.add_cog(LockdownPanel(bot))
+    logger.info("Cog de Painel de Lockdown configurada e adicionada ao bot.")
