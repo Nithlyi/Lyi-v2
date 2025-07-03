@@ -23,15 +23,23 @@ class SayCommand(commands.Cog):
         if not channel.permissions_for(interaction.guild.me).send_messages:
             await interaction.followup.send(f"Não tenho permissão para enviar mensagens em {channel.mention}.", ephemeral=True)
             logging.warning(f"Comando /say: Bot sem permissão para enviar mensagem no canal {channel.id} na guild {interaction.guild.id}.")
+            # Edita a resposta original para informar a falta de permissão
+            await interaction.edit_original_response(content=f"Não tenho permissão para enviar mensagens em {channel.mention}.")
             return
 
         try:
             await channel.send(message)
-            await interaction.followup.send(f"Mensagem enviada com sucesso em {channel.mention}.", ephemeral=True)
             logging.info(f"Comando /say usado por {interaction.user.id} para enviar mensagem em {channel.id} na guild {interaction.guild.id}.")
+            # Edita a resposta original para confirmar o envio
+            await interaction.edit_original_response(content=f"Mensagem enviada com sucesso em {channel.mention}.")
         except Exception as e:
-            await interaction.followup.send(f"Ocorreu um erro ao enviar a mensagem: {e}", ephemeral=True)
-            logging.error(f"Comando /say: Erro ao enviar mensagem em {channel.id} na guild {interaction.guild.id}: {e}")
+            logging.error(f"Comando /say: Erro inesperado ao enviar mensagem em {channel.id} na guild {interaction.guild.id}: {e}", exc_info=True)
+            # Em caso de erro (mesmo que no edit da resposta), edita a resposta original para mostrar o erro.
+            # Isto é um fallback, o erro 429 no edit ainda pode ocorrer, mas é menos provável.
+            try:
+                 await interaction.edit_original_response(content=f"Ocorreu um erro ao enviar a mensagem: {e}")
+            except Exception as edit_err:
+                 logging.error(f"Comando /say: Falha secundária ao editar resposta de erro: {edit_err}")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SayCommand(bot))
