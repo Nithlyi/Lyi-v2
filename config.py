@@ -13,7 +13,9 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # Se você tiver um servidor específico para testar os slash commands, coloque o ID aqui.
 # Isso fará com que os comandos de barra sejam registrados instantaneamente lá.
 # Ex: TEST_GUILD_ID = 123456789012345678
-TEST_GUILD_ID = None # Mude para o ID do seu servidor de testes se quiser.
+# *** MUDANÇA AQUI: Lê do ambiente, se existir, senão é None ***
+TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
 
-# Prefixo para comandos de texto (se você for usar)
-COMMAND_PREFIX = "!"
+# Prefixo para comandos de texto
+# *** MUDANÇA AQUI: Lê do ambiente, se existir, senão usa "!" como padrão ***
+COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!") # O "!" será o padrão se a variável não for encontrada
